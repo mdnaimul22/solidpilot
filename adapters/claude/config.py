@@ -40,3 +40,12 @@ _DEFAULT_EXE = os.path.normpath(
 EXECUTION_EXE_PATH = os.getenv("EXECUTION_EXE_PATH", _DEFAULT_EXE)
 # How long to wait for a freshly-spawned server to answer /health before giving up.
 SERVER_SPAWN_TIMEOUT = float(os.getenv("SERVER_SPAWN_TIMEOUT", "20"))
+
+# Build script for the execution layer. The working build uses the portable Roslyn compiler (the
+# .NET Framework csc.exe is C# 5 only and rejects this source), so the script — not this adapter —
+# is what knows the compiler path. Override with SW_BUILD_SCRIPT when it moves.
+SW_BUILD_SCRIPT = os.getenv(
+    "SW_BUILD_SCRIPT",
+    os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "build.ps1")),
+)
+SW_BUILD_TIMEOUT = float(os.getenv("SW_BUILD_TIMEOUT", "300"))

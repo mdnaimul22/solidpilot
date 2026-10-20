@@ -3,14 +3,17 @@ import inspect
 import json
 import os
 import sys
+import tempfile
 import uuid
 from datetime import datetime, timezone
 from typing import Annotated, Literal, Optional
 from pydantic import Field
 from mcp.server import MCPServer
 from mcp.server.caching import CacheHint
+from mcp.server.mcpserver import Image
 from mcp.server.mcpserver.exceptions import ResourceError
-from execution_client import call_tool, get_state, ensure_ready as _ensure_ready, ExecutionLayerError
+from execution_client import (call_tool, get_state, ensure_ready as _ensure_ready,
+                             restart_server, ExecutionLayerError)
 from response_mapper import map_response
 # NOTE: pycompiler is reached via `from ir_execution_port import run_feature_graph` imported
 # LAZILY inside rebuild_from_ir and submit_feature_graph — a missing compiler tree degrades to a
@@ -127,6 +130,41 @@ def ensure_ready() -> str:
         f"sw_version={body.get('swVersion')} | "
         f"state_version={body.get('stateVersion')}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Tool: restart_execution_server  (lifecycle — replaces the hand-run kill/build/start cycle)
+# ---------------------------------------------------------------------------
+@mcp.tool(structured_output=False)
+def restart_execution_server(rebuild: bool = False) -> str:
+    """Restart the SolidWorks EXECUTION layer — the C# process (`SolidworksExecution.exe`) that every
+    other `solidworks.*` tool talks to — and optionally rebuild it from source first.
+
+    Use it after ANY change under `execution/solidworks/SolidworksExecution`: `rebuild=True` stops the
+    server, runs the portable-Roslyn build (`build.ps1`), starts the new exe and waits for `/health`.
+    `rebuild=False` just restarts it — the fix for a hung/zombie server or a stale COM attach. A failed
+    build is reported (`build_exit`, `build_tail`) and the PREVIOUS exe is still what starts, so the
+    tool never leaves the session without a server.
+
+    This does NOT and cannot restart the MCP adapter (`server.py`): that process' stdio is owned by the
+    MCP client, and the client reads the tool list once per connection. After editing server.py,
+    reconnect the server on the client side — in OpenCode run `/mcps`, select `solidworks`,
+    disconnect, then connect (or start a new session). Nothing inside this file can do that for you.
+
+    Safe with respect to CAD state: it kills `SolidworksExecution.exe` only, never `SLDWORKS.exe`, and
+    an open document (with unsaved edits) survives the restart — the new server re-attaches via COM.
+    Returns the stop output, build exit code + last lines, `/health`, and the `ensure_ready` payload."""
+    global _state_version
+    body = restart_server(rebuild=rebuild)
+    try:
+        ensure_body = _ensure_ready()
+        body["ensure"] = ensure_body
+        sv = ensure_body.get("stateVersion")
+        if sv is not None:
+            _state_version = sv
+    except Exception as ex:      # the server is up (or not) — report, never mask the restart result
+        body["ensure_error"] = str(ex)
+    return json.dumps(body, indent=2)
 
 
 # ---------------------------------------------------------------------------
@@ -609,11 +647,225 @@ def add_edge_feature(
 # Tool: create_drawing
 # ---------------------------------------------------------------------------
 @mcp.tool(structured_output=False)
-def create_drawing(model_path: str = "") -> str:
-    """Open a new SolidWorks drawing document (A3 sheet, 1:1 scale).
+def create_drawing(
+    model_path: str = "",
+    sheet_size: Literal["A4", "A3", "A2", "A1", "A0"] = "A3",
+    orientation: Literal["landscape", "portrait"] = "landscape",
+) -> str:
+    """Open a new SolidWorks drawing document at the requested paper size/orientation (default A3
+    landscape).
     model_path: optional path to the part/assembly to reference. If omitted, an empty drawing is created.
+    sheet_size: 'A4', 'A3', 'A2', 'A1', 'A0' (default 'A3'). A custom size is NOT available here
+    (no width/height): make a standard sheet, then use set_drawing_sheet {size:'custom', width, height}.
+    orientation: 'landscape' (default) or 'portrait'.
+    The sheet is created EMPTY - no border, no title block.
     Note: add_drawing_view requires the referenced part to be saved to disk."""
-    return _call("create_drawing", {"model_path": model_path})
+    return _call("create_drawing",
+                 {"model_path": model_path, "sheet_size": sheet_size, "orientation": orientation})
+
+
+# ---------------------------------------------------------------------------
+# Tool: set_document_units
+# ---------------------------------------------------------------------------
+@mcp.tool(structured_output=False)
+def set_document_units(
+    linear: Literal["mm", "cm", "m", "in", "ft", "ft-in", "micron", "mil", "uin"] = "mm",
+    decimals: Annotated[int, Field(
+        ge=0, le=6, description="Decimal places for linear dimensions (0-6)")] = 2,
+) -> str:
+    """Set the DOCUMENT units of the active document — the setting that decides what unit dimension
+    text is shown in. Call it right after create_drawing so dimensions read in mm instead of the
+    drawing template's default units; it also applies to parts/assemblies (model dimensions and
+    property values follow the document unit).
+
+    linear: 'mm' (default), 'cm', 'm', 'in', 'ft', 'ft-in', 'micron', 'mil', 'uin'.
+    decimals: decimal places for linear dimensions, 0-6 (default 2).
+    Bumps state_version; result_geometry echoes {linear, decimals} read BACK from the document."""
+    return _call("set_document_units", {"linear": linear, "decimals": decimals})
+
+
+# ---------------------------------------------------------------------------
+# Tool: set_drawing_sheet
+# ---------------------------------------------------------------------------
+@mcp.tool(structured_output=False)
+def set_drawing_sheet(
+    sheet: str = "",
+    size: Literal["A4", "A3", "A2", "A1", "A0", "custom", ""] = "",
+    orientation: Literal["landscape", "portrait"] = "landscape",
+    width: Annotated[float, Field(
+        gt=0, description="Sheet width in METERS — only for size='custom'")] = 0,
+    height: Annotated[float, Field(
+        gt=0, description="Sheet height in METERS — only for size='custom'")] = 0,
+) -> str:
+    """Change a sheet's paper size and orientation in the active drawing, and/or activate it.
+
+    sheet: sheet name to activate (e.g. 'Sheet1'); omit to use the current sheet.
+    size: 'A4','A3','A2','A1','A0','custom'; leave '' to keep the current size.
+    orientation: 'landscape' (default) or 'portrait' (for 'custom', width/height win).
+    width/height: sheet size in METERS, only for size='custom'.
+
+    The sheet SCALE is not a parameter here: on a sheet that carries a sheet format SolidWorks'
+    SetScale does not give back the ratio you asked for. Size views with add_drawing_view's own
+    scale, and print the scale you want as note text.
+
+    The size is set then READ BACK and the result reported, because ISheet.SetSize's return value is
+    unreliable for some standard papers. Bumps state_version; result_geometry echoes
+    {sheet, size, orientation, width, height, sheet_count}."""
+    params = {"sheet": sheet, "size": size, "orientation": orientation}
+    if size == "custom":
+        params["width"] = width
+        params["height"] = height
+    return _call("set_drawing_sheet", params)
+
+
+# ---------------------------------------------------------------------------
+# Tool: add_drawing_sheet
+# ---------------------------------------------------------------------------
+@mcp.tool(structured_output=False)
+def add_drawing_sheet(
+    name: str = "",
+    size: Literal["A4", "A3", "A2", "A1", "A0", "custom"] = "A4",
+    orientation: Literal["landscape", "portrait"] = "landscape",
+    width: Annotated[float, Field(
+        gt=0, description="Sheet width in METERS — only for size='custom'")] = 0,
+    height: Annotated[float, Field(
+        gt=0, description="Sheet height in METERS — only for size='custom'")] = 0,
+    activate: bool = True,
+) -> str:
+    """Add a NEW sheet to the active drawing — the multi-page packet primitive (one part/assembly
+    per page in the printable convention).
+
+    name: new sheet name; omit for 'Sheet<N>'.
+    size: 'A4' (default),'A3','A2','A1','A0','custom'; orientation: 'landscape' (default) or 'portrait'.
+    width/height: METERS, only for size='custom'.
+    activate: make the new sheet the active one (default True).
+
+    The sheet is added with NO sheet format (no border/title block), matching the plain-text
+    printable layout. Bumps state_version; result_geometry echoes
+    {sheet, size, orientation, width, height, sheet_count}."""
+    params = {"name": name, "size": size, "orientation": orientation,
+              "activate": activate}
+    if size == "custom":
+        params["width"] = width
+        params["height"] = height
+    return _call("add_drawing_sheet", params)
+
+
+# ---------------------------------------------------------------------------
+# Tool: add_drawing_note
+# ---------------------------------------------------------------------------
+@mcp.tool(structured_output=False)
+def add_drawing_note(
+    text: str,
+    x: float,
+    y: float,
+    height: Annotated[float, Field(
+        gt=0, description="Text height in METERS (0.0035 = 3.5 mm)")] = 0.0035,
+    justification: Literal["left", "center", "right"] = "left",
+    bold: bool = False,
+    italic: bool = False,
+    leader: bool = False,
+    leader_x: float = 0,
+    leader_y: float = 0,
+    leader_type: Literal["edge", "vertex", "face", "silhouette", "sketch_segment", "component"] = "edge",
+    leader_side: Literal["left", "right", "smart"] = "right",
+    sheet: str = "",
+) -> str:
+    """Insert a NOTE (free text, single- or multi-line) on a drawing sheet — the printable-layout
+    primitive: the lower-left 'Part Name / Unit / Material' block, the lower-right
+    'Measurement : Millimeter', page numbers, and leader labels.
+
+    text: the note text; use '\\n' for a new line. Placeholders are resolved from the drawing and
+        its referenced model: {part_name} {material} {model} {drawing} {page} {pages} {sheet}
+        {scale} {date} {units}. Unknown placeholders are left untouched.
+    x/y: note position on the SHEET in meters, measured from the sheet's lower-left corner
+        (e.g. x=0.012, y=0.012 is just inside the bottom-left of an A4 landscape sheet).
+    height: text height in meters (default 0.0035 = 3.5 mm).
+    justification: 'left' (default), 'center', 'right' — anchor at x.
+    bold/italic: font styling (best-effort; cosmetic).
+    leader: attach a leader from the note to an entity (assembly callout labels).
+    leader_x/leader_y: sheet-meters point ON the entity (required when leader=True). Use the drawing
+        view's pos from analyze_slddrw_test / add_drawing_view, or a point on the projected edge.
+    leader_type: 'edge' (default), 'vertex', 'face', 'silhouette', 'sketch_segment', 'component'.
+        'component' or 'face' are the robust choices — any interior point works; 'edge' needs a point
+        exactly ON the edge.
+    leader_side: 'right' (default), 'left', 'smart'.
+    sheet: target sheet name; omit for the active sheet.
+
+    Bumps state_version; result_geometry echoes {text, resolved_text, note, note_count, added, sheet, ...}."""
+    params = {"text": text, "x": x, "y": y, "height": height,
+              "justification": justification, "bold": bold, "italic": italic,
+              "sheet": sheet}
+    if leader:
+        params["leader"] = True
+        params["leader_x"] = leader_x
+        params["leader_y"] = leader_y
+        params["leader_type"] = leader_type
+        params["leader_side"] = leader_side
+    else:
+        params["leader"] = False
+    return _call("add_drawing_note", params)
+
+
+# ---------------------------------------------------------------------------
+# Tool: add_balloon
+# ---------------------------------------------------------------------------
+@mcp.tool(structured_output=False)
+def add_balloon(
+    x: float,
+    y: float,
+    text: str = "",
+    style: Literal["circle", "box", "square", "hexagon", "diamond", "triangle", "underline"] = "circle",
+    size: Literal["auto", "1", "2", "3", "4", "5"] = "auto",
+    text_x: float = 0,
+    text_y: float = 0,
+) -> str:
+    """Insert ONE BOM balloon (item number, or custom text) attached to the component under a point
+    in a drawing view — the assembly-callout primitive.
+
+    x/y: sheet-meters point ON the component in a view; the leader attaches there.
+    text: custom balloon text; omit for the component's BOM item number.
+    style: 'circle' (default), 'box', 'square', 'hexagon', 'diamond', 'triangle', 'underline'.
+    size: 'auto' (default = document default), or '1'..'5' (characters the balloon must fit).
+    text_x/text_y: place the balloon circle at this sheet-meters point instead of the default offset.
+
+    For a plain text label with a leader use add_drawing_note(leader=True); for a numbered legend over
+    every component use auto_balloon. Bumps state_version; result_geometry echoes
+    {note, text, style, x, y, balloon_x, balloon_y}."""
+    params = {"x": x, "y": y, "text": text, "style": style, "size": size}
+    if text_x or text_y:
+        params["text_x"] = text_x
+        params["text_y"] = text_y
+    return _call("add_balloon", params)
+
+
+# ---------------------------------------------------------------------------
+# Tool: auto_balloon
+# ---------------------------------------------------------------------------
+@mcp.tool(structured_output=False)
+def auto_balloon(
+    view: str,
+    layout: Literal["square", "circle", "top", "bottom", "right", "left"] = "circle",
+    style: Literal["circle", "box", "square", "hexagon", "diamond", "triangle", "underline"] = "circle",
+    ignore_multiple: bool = True,
+    item_number_start: Annotated[int, Field(
+        ge=1, description="First item number")] = 1,
+) -> str:
+    """Auto-balloon EVERY component in a drawing view in one call (a numbered BOM legend), with the
+    balloons laid out around the view. Use add_balloon for a single custom callout.
+
+    view: drawing view name — from add_drawing_view's features[0], or analyze_slddrw_test.
+    layout: where balloons are placed around the view: 'circle' (default), 'square', 'top', 'bottom',
+        'right', 'left'. Give the view room on the sheet — balloons placed outside the sheet edge are
+        not visible.
+    style: balloon shape — 'circle' (default), 'box', 'square', 'hexagon', 'diamond', 'triangle', 'underline'.
+    ignore_multiple: one balloon per component, not one per instance (default True).
+    item_number_start: first item number (default 1).
+
+    Bumps state_version; result_geometry echoes {view, count, note_count, layout, style, notes}."""
+    return _call("auto_balloon",
+                 {"view": view, "layout": layout, "style": style,
+                  "ignore_multiple": ignore_multiple, "item_number_start": item_number_start})
 
 
 # ---------------------------------------------------------------------------
@@ -707,32 +959,118 @@ def add_drawing_dimension(
 
 
 # ---------------------------------------------------------------------------
+# Tool: delete_drawing_dimension
+# ---------------------------------------------------------------------------
+@mcp.tool(structured_output=False)
+def delete_drawing_dimension(
+    name: str = "",
+    px: Optional[float] = None,
+    py: Optional[float] = None,
+    tolerance_mm: float = 3.0,
+    all_matching: bool = False,
+) -> str:
+    """Delete ONE dimension from the active drawing — or LIST the sheet when given no target.
+
+    Address the dimension in either of two ways:
+      * name   — the display name ('RD2') or the full name ('RD2@Drawing View2'), exactly as
+                 analyze_slddrw_test or this tool's own result_geometry.dimensions prints it.
+      * px/py  — the SHEET point where the dimension's TEXT sits (METRES, sheet origin = the
+                 lower-left corner of the paper). The nearest text within tolerance_mm is deleted.
+
+    Called with no target (empty name, no px/py) it CHANGES NOTHING and returns
+    result_geometry.dimensions[]: every dimension on the sheet with name, full_name, view,
+    value_mm, diametric and text_mm. Call it that way FIRST when you need to remove something a
+    PERSON drew by hand — auto_dimension_drawing's essentials mode cannot see dimensions it did
+    not create itself (clear_existing wipes ALL of them), so this is the only surgical delete path.
+
+    Returns action ('deleted' | 'listed' | 'not_found'), deleted[], remaining_count and the
+    remaining dimensions — re-read AFTER the deletion, so the reply is proof of what is on the
+    sheet now. Bumps state_version only when something was actually deleted."""
+    return _call(
+        "delete_drawing_dimension",
+        {"name": name, "px": px, "py": py, "tolerance_mm": tolerance_mm,
+            "all_matching": all_matching},
+    )
+
+
+# ---------------------------------------------------------------------------
 # Tool: auto_dimension_drawing
 # ---------------------------------------------------------------------------
 @mcp.tool(structured_output=False)
 def auto_dimension_drawing(
+    mode: str = "essentials",
     all_views: bool = True,
     include_unmarked: bool = False,
     eliminate_duplicates: bool = True,
+    gap: float = 0.012,
+    include_callouts: bool = True,
+    include_hole_positions: bool = True,
+    include_circle_diameters: bool = True,
+    clear_existing: bool = False,
 ) -> str:
-    """Transfer the MODEL's driving dimensions into the active drawing's views (SolidWorks 'Insert
-    Model Items > Dimensions'). PREFER this over add_drawing_dimension's coordinate pick — the
-    values come from the model's own parametric dimensions and are placed for you. Call it AFTER
-    create_drawing + add_drawing_view(s), then verify with analyze_slddrw_test (dimension_count > 0,
-    values matching the model).
+    """Dimension the active drawing. TWO MODES, and they are not interchangeable.
 
-    all_views: insert into all drawing views (True) or only the currently selected view (False). Default True.
-    include_unmarked: also insert driving dimensions NOT marked for drawing (i.e. ALL driving dims), not just
-        those flagged 'marked for drawing'. More complete but noisier. Default False — if a marked-only pass
-        inserts 0 dimensions (the part's dims weren't marked for drawing), re-call with include_unmarked=True.
-    eliminate_duplicates: avoid inserting the same model dimension into more than one view. Default True.
+    mode="essentials" (DEFAULT) — the printable-set convention taken from the client's 19 reference
+        sheets: a CURATED set, not every model dimension. It reads each ORTHOGRAPHIC view's projected
+        geometry and adds, at positions it computes itself (so they cannot overlap):
+          * overall WIDTH below the view and overall HEIGHT left of the view (the envelope),
+          * one hole callout per DISTINCT diameter ("4xØ21", "Ø28 THRU"),
+          * the hole POSITIONS as a baseline row of distinct X plus a column of distinct Y,
+          * a verified Ø dimension for every remaining CIRCLE on a view that owns no callout (a
+            small hole seen end-on, a turned profile's steps): the arc is picked by its RADIUS, the
+            diameter is read back from the geometry and deleted unless it matches, so this pass can
+            only ever print a true number.
+        THREE RULES make the result look like the references:
+          1. ONE MEASUREMENT, ONE TIME PER SHEET. A part's envelope appears in every view; measuring it
+             in two of them is the single most common defect of a hand-made sheet (the reference sheets
+             never print 406.00 twice). The first view that claims a value keeps it, the others report
+             it in result_geometry.skipped.
+          2. The hole callouts AND the hole positions go on ONE view per sheet — the view that shows
+             the most holes as circles (the face view). A neighbouring view projects those same holes
+             as plain lines, so dimensioning them there would print a second set of values; its only
+             circles are corner fillets, and calling those out produced "Ø5.00" on an end view with no
+             hole at all.
+          3. Every created value is read back and compared with the value the geometry implies; a
+             disagreeing dimension is DELETED rather than left to print a wrong number (a missed pick
+             used to turn a 38 mm hole position into the hole's 6 mm DIAMETER).
+        The shaded isometric is skipped automatically (the reference sheets never dimension it).
+        It inserts NOTHING from the model, so it never reproduces the 21-60 colliding dimensions that
+        mode="model" produces. result_geometry.created lists every dimension with the value SolidWorks
+        produced (value_mm) beside the value the geometry implies (expected_mm) and match=true/false —
+        check that before printing.
 
-    Returns COMPLETED with result_geometry.inserted_count (the number of dimensions placed; 0 is a valid
-    outcome). Requires an active drawing with at least one model view. Bumps state_version."""
+    mode="model" — the raw SolidWorks 'Insert Model Items > Dimensions' transfer: EVERY driving
+        dimension marked for drawing, placed where SolidWorks wants. Use it when you deliberately
+        want the model's full dimension set, and expect a crowded sheet.
+
+    Prefer 'essentials' for anything that will be printed for a client. Call after
+    create_drawing + add_drawing_view(s), then look at the page with drawing_preview and verify with
+    analyze_slddrw_test.
+
+    gap: distance in METRES between the drawing and the first dimension row (and between rows). Default 0.012 (12 mm).
+    include_callouts / include_hole_positions: turn the callout pass / the position chain off, leaving
+        only the envelope. 'essentials' only.
+    include_circle_diameters: 'essentials' only, default True. Adds a verified Ø dimension to every
+        circle the callout pass did not already cover — which is what fills in the Ø a neighbouring
+        view shows but the hole-owning view does not. Corner arcs/fillets (a circle that touches the
+        view's bounding box in both axes with nothing concentric) are skipped: a Ø on a fillet is not
+        a hole. Values are always read back from the geometry, never written by the caller.
+    clear_existing: 'essentials' only. Delete the sheet's existing display dimensions (the curated
+        dimensions AND the hole callouts) before creating the new set. This is what makes RE-RUNNING
+        safe: without it every pass piles a second copy on the sheet, which used to force a brand-new
+        drawing document per attempt. Use it whenever you refresh a sheet this mode already produced.
+    all_views / include_unmarked / eliminate_duplicates: 'model' mode only (see mode="model" above).
+
+    Returns COMPLETED with result_geometry.inserted_count and, for 'essentials', the per-dimension
+    'created' diagnostic array. Requires an active drawing with at least one model view. Bumps state_version."""
     return _call(
         "auto_dimension_drawing",
-        {"all_views": all_views, "include_unmarked": include_unmarked,
-            "eliminate_duplicates": eliminate_duplicates},
+        {"mode": mode, "all_views": all_views, "include_unmarked": include_unmarked,
+            "eliminate_duplicates": eliminate_duplicates, "gap": gap,
+            "include_callouts": include_callouts,
+            "include_hole_positions": include_hole_positions,
+            "include_circle_diameters": include_circle_diameters,
+            "clear_existing": clear_existing},
     )
 
 
@@ -826,15 +1164,65 @@ def add_section_view(
 # Tool: export_document
 # ---------------------------------------------------------------------------
 @mcp.tool(structured_output=False)
-def export_document(format: Literal["STEP", "IGES", "STL", "PDF", "DWG", "DXF"], file_path: str) -> str:
+def export_document(format: Literal["STEP", "IGES", "STL", "PDF", "DWG", "DXF", "PNG"], file_path: str) -> str:
     """Export the active SolidWorks document to a file. The document remains open after export.
-    format: 'STEP', 'IGES', 'STL', 'PDF', 'DWG', 'DXF'.
+    format: 'STEP', 'IGES', 'STL', 'PDF', 'DWG', 'DXF', 'PNG'.
     file_path: full output path including filename and extension (e.g. 'C:/output/part.step').
     Note: DWG and DXF require an active drawing document (use create_drawing first).
     PDF uses SolidWorks PDF export options. STEP/IGES/STL work with part or assembly documents.
-    IGES must use a .igs extension (.iges is auto-corrected to .igs)."""
+    IGES must use a .igs extension (.iges is auto-corrected to .igs).
+    PNG is the WAY TO LOOK AT A DRAWING: a PDF's notes are written as outlines, so its text cannot be
+    extracted and the PDF itself cannot be screenshotted on this machine - export the drawing again as
+    PNG and read that. It renders the ACTIVE SHEET as one image (wider frame than the paper)."""
     # export does NOT change CAD state; the execution layer returns the same state_version.
     return _call("export_document", {"format": format, "file_path": file_path})
+
+
+# ---------------------------------------------------------------------------
+# Tool: drawing_preview  (the EYES - returns the active sheet as a real image)
+# ---------------------------------------------------------------------------
+@mcp.tool(structured_output=False)
+def drawing_preview(sheet: str = "") -> Image:
+    """LOOK at the active drawing - returns the ACTIVE SHEET as a real image, not a description.
+
+    Call this after EVERY drawing step (add_drawing_view, add_section_view, auto_dimension_drawing,
+    add_drawing_note, add_balloon, set_drawing_sheet ...) and look at what came back before deciding
+    the next step. A text read-back only says a call succeeded; it cannot tell you that two views
+    overlap, that dimension text collides, that a view ran off the paper, that a note landed on a
+    view, or that the layout does not look like the reference. Building a sheet blind and exporting
+    a PDF at the end is how unreadable drawings get produced - by the time the PDF shows the
+    problem, the modelling decisions behind it are already wrong.
+
+    sheet: optional sheet name ('Sheet2') to activate before rendering; omit to render whichever
+    sheet is already active.
+
+    Renders the whole active sheet at a fixed height into a frame WIDER than the paper (side
+    padding), so paper-relative positions hold but the image is not a crop of the paper itself.
+    Nothing about the CAD state changes except the optional sheet activation."""
+    if sheet:
+        _call("set_drawing_sheet", {"sheet": sheet})
+
+    out_dir = os.path.join(tempfile.gettempdir(), "solidworks_preview")
+    os.makedirs(out_dir, exist_ok=True)
+    # a preview is scratch: keep the folder from growing without bound
+    try:
+        rendered = sorted(
+            (os.path.join(out_dir, f) for f in os.listdir(out_dir) if f.lower().endswith(".png")),
+            key=os.path.getmtime,
+        )
+        for stale in rendered[:-11]:
+            os.remove(stale)
+    except OSError:
+        pass
+
+    path = os.path.join(out_dir, "sheet_" + uuid.uuid4().hex[:12] + ".png")
+    result = _call("export_document", {"format": "PNG", "file_path": path})
+    if not os.path.exists(path):
+        raise ExecutionLayerError(
+            "drawing_preview could not render the active sheet, so there is nothing to look at. "
+            "It needs an active DRAWING document (create_drawing + add_drawing_view first). "
+            "Execution layer said: " + str(result))
+    return Image(path=path)
 
 
 # ---------------------------------------------------------------------------

@@ -50,13 +50,43 @@ namespace SolidworksExecution.Services
                     templatePath = found[0];
                 }
 
-                // A3 paper (297x420mm), scale 1:1
-                object doc = _solidWorks.NewDocument(templatePath,
-                    (int)swDwgPaperSizes_e.swDwgPapersUserDefined, 0.420, 0.297);
+                // Sheet paper + orientation (default A3 landscape, the size this tool always made).
+                // 'custom' is refused here: this tool has no width/height, and MapPaperSize would
+                // hand NewDocument a ZERO-size sheet. Make a standard sheet, then resize it with
+                // set_drawing_sheet {size:'custom', width, height}.
+                string sheetSize = p?.Value<string>("sheet_size") ?? "A3";
+                string orientation = p?.Value<string>("orientation") ?? "landscape";
+                if (string.Equals((sheetSize ?? "").Trim(), "custom", StringComparison.OrdinalIgnoreCase))
+                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                        "UNSUPPORTED_SIZE",
+                        "create_drawing has no width/height and cannot make a 'custom' sheet. " +
+                        "Create a standard size, then call set_drawing_sheet {size:'custom', width, height}.");
+
+                int paper; double sheetW, sheetH;
+                if (!MapPaperSize(sheetSize, orientation, 0, 0, out paper, out sheetW, out sheetH))
+                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                        "UNSUPPORTED_SIZE", "sheet_size must be one of: A4, A3, A2, A1, A0.");
+
+                object doc = _solidWorks.NewDocument(templatePath, paper, sheetW, sheetH);
                 var modelDoc = doc as IModelDoc2;
                 if (modelDoc == null)
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                         "DOCUMENT_CREATION_FAILED", "SolidWorks NewDocument returned null for drawing template.");
+
+                // A shop drawing is read in millimetres. The template that ships with this SolidWorks
+                // install is an INCH sheet: measured 2026-10-20, a created A3 sheet printed "Ø1.57 THRU"
+                // on a Ø40 hole. The units are set as soon as the document exists, never left to the
+                // template.
+                int mmUnit, mmSystem;
+                if (MapLinearUnit("mm", out mmUnit, out mmSystem))
+                    ApplyLinearUnits(modelDoc, mmUnit, mmSystem, 2);
+
+                // Report the size SolidWorks actually created (ground truth, not the input).
+                var createdDrawing = modelDoc as IDrawingDoc;
+                var createdSheet = createdDrawing != null ? createdDrawing.GetCurrentSheet() as ISheet : null;
+                double actualW = sheetW, actualH = sheetH;
+                if (createdSheet != null)
+                    createdSheet.GetSize(ref actualW, ref actualH);
 
                 var response = new ExecutionResponse
                 {
@@ -72,6 +102,14 @@ namespace SolidworksExecution.Services
                         ActiveSketch = null,
                         Features = new List<string>(),
                         Dimensions = new List<string>()
+                    },
+                    ResultGeometry = new JObject
+                    {
+                        ["sheet_size"] = sheetSize,
+                        ["orientation"] = orientation,
+                        ["width"] = R6(actualW),
+                        ["height"] = R6(actualH),
+                        ["sheet_count"] = createdDrawing != null ? createdDrawing.GetSheetCount() : 1
                     },
                     Error = null
                 };
@@ -108,8 +146,14 @@ namespace SolidworksExecution.Services
             {
                 var p = request.Params as JObject;
                 string viewType = (p?.Value<string>("view_type") ?? "front").ToLowerInvariant();
-                double posX = p?.Value<double?>("pos_x") ?? 0.1;
-                double posY = p?.Value<double?>("pos_y") ?? 0.1;
+                const double DefaultViewPosition = 0.1;
+                double posX = p?.Value<double?>("pos_x") ?? DefaultViewPosition;
+                double posY = p?.Value<double?>("pos_y") ?? DefaultViewPosition;
+                // (0.1, 0.1) is this tool's own default and means "choose a free spot": the adapter
+                // fills the documented defaults in, so an absent position is indistinguishable from
+                // that pair. Any other pair is an explicit request and is kept when it is legal.
+                bool autoPlace = Math.Abs(posX - DefaultViewPosition) < 1e-9 &&
+                                 Math.Abs(posY - DefaultViewPosition) < 1e-9;
                 double scale = p?.Value<double?>("scale") ?? 1.0;
                 string modelPath = p?.Value<string>("model_path") ?? "";
                 string displayMode = (p?.Value<string>("display_mode") ?? "").Trim().ToLowerInvariant();
@@ -170,6 +214,10 @@ namespace SolidworksExecution.Services
 
                 // Apply scale
                 view.ScaleDecimal = scale;
+
+                // Placement guard: a legal caller position is kept; a colliding or off-sheet view is
+                // moved to a free, aligned spot (and shrunk if the paper has no room at that scale).
+                PlaceViewWithoutOverlap(drawingDoc, view, autoPlace);
 
                 // Apply display mode (drafting convention). swDisplayMode_e:
                 //   0=WIREFRAME, 1=HIDDEN_GREYED (Hidden Lines Visible/HLV), 2=HIDDEN (Hidden Lines Removed/HLR),
@@ -408,6 +456,18 @@ namespace SolidworksExecution.Services
                 modelDoc.ClearSelection2(true);
                 modelDoc.GraphicsRedraw2();
 
+                // ---- CIRCLE PATH (2026-10-19) -----------------------------------------------
+                // A hole that is tiny ON PAPER cannot be reached by the plain EDGE probe below: at
+                // scale 0.3 a Ø4 hole is 1.2 mm wide, the probe resolved to the long edge behind it and
+                // the tool printed 406.00 on Part1's front view (measured). When the point lies on a
+                // projected CIRCLE, verify that circle with the radius-checked pick and create a
+                // DIAMETER dimension whose value is READ BACK from the geometry — the caller's `value`
+                // is never written onto a circle dimension, so this path can only print a true number.
+                ExecutionResponse circleResponse;
+                if (TryAddCircleDiameterDimension(request, modelDoc, px.Value, py.Value,
+                        labelOffsetX, labelOffsetY, out circleResponse))
+                    return circleResponse;
+
                 bool prevInputDimVal = _solidWorks.GetUserPreferenceToggle(
                     (int)swUserPreferenceToggle_e.swInputDimValOnCreate);
                 _solidWorks.SetUserPreferenceToggle(
@@ -475,6 +535,584 @@ namespace SolidworksExecution.Services
                 return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                     "UNEXPECTED_ERROR", ex.Message);
             }
+        }
+
+        // Circle-aware dimension path used by add_drawing_dimension (see the call site).
+        private bool TryAddCircleDiameterDimension(ToolRequest request, IModelDoc2 modelDoc,
+            double px, double py, double labelOffsetX, double labelOffsetY,
+            out ExecutionResponse response)
+        {
+            response = null;
+            try
+            {
+                var drawingDoc = modelDoc as IDrawingDoc;
+                if (drawingDoc == null) return false;
+
+                // Nearest projected circle across every view. ExtractViewGeometry returns view-plane
+                // metres centred on the view anchor, so sheet = position + scale * point.
+                IView bestView = null;
+                CircleRec bestCircle = null;
+                double bestDist = double.MaxValue;
+                double bestScale = 1.0;
+                double[] bestPos = null;
+
+                object vo = drawingDoc.GetFirstView();
+                int guard = 0;
+                while (vo != null && guard++ < 500)
+                {
+                    var v = vo as IView;
+                    object next = null;
+                    if (v != null)
+                    {
+                        try { next = v.GetNextView(); } catch { }
+                        try
+                        {
+                            double scale = 1.0; try { scale = v.ScaleDecimal; } catch { }
+                            var pos = v.Position as double[];
+                            if (scale > 0 && pos != null && pos.Length >= 2)
+                            {
+                                var g = ExtractViewGeometry(v);
+                                if (g != null)
+                                    foreach (var c in g.Circles)
+                                    {
+                                        double cx = pos[0] + scale * c.CX;
+                                        double cy = pos[1] + scale * c.CY;
+                                        double dx = px - cx, dy = py - cy;
+                                        double d = Math.Abs(Math.Sqrt(dx * dx + dy * dy) - scale * c.R);
+                                        if (d < bestDist)
+                                        {
+                                            bestDist = d; bestCircle = c;
+                                            bestView = v; bestScale = scale; bestPos = pos;
+                                        }
+                                    }
+                            }
+                        }
+                        catch { }
+                    }
+                    vo = next;
+                }
+
+                // Claim the point only if it really sits on that circle's edge on PAPER (0.5 mm ~ half
+                // a text height). Anything further away is a line, and the legacy path stays in charge.
+                if (bestCircle == null || bestPos == null || bestDist > 0.0005) return false;
+
+                Func<double, double, double[]> S =
+                    (u, w) => new[] { bestPos[0] + bestScale * u, bestPos[1] + bestScale * w };
+                double[] fori, fx = null, fy = null;
+                try { ViewModelFrameRaw(bestView, out fori, out fx, out fy); } catch { }
+
+                double tx = px + labelOffsetX, ty = py + labelOffsetY;
+
+                // A dimension already sitting at this text point must never be duplicated: if it is
+                // this circle's diameter the job is done; if it is anything else — a leftover from an
+                // earlier pick that landed on the wrong entity (measured: a 406.00 linear dimension
+                // planted on Part1's front view) — it is removed before the new one goes in.
+                // This check CLEARS the selection, so it must run BEFORE the circle is picked.
+                bool already = false;
+                double existing = ReadDimensionValueAt(modelDoc, tx, ty);
+                if (existing > 0)
+                {
+                    if (Math.Abs(existing - bestCircle.R * 2000.0) < 0.05) already = true;
+                    else DeleteDimensionAt(modelDoc, tx, ty);
+                }
+
+                if (!already)
+                {
+                    modelDoc.ClearSelection2(true);
+                    modelDoc.GraphicsRedraw2();
+                    double[] hit;
+                    if (!PickAt(modelDoc, CirclePick(bestCircle, S, fx, fy), false,
+                            "add_drawing_dimension circle", out hit))
+                        return false;
+                }
+
+                bool prev = _solidWorks.GetUserPreferenceToggle(
+                    (int)swUserPreferenceToggle_e.swInputDimValOnCreate);
+                _solidWorks.SetUserPreferenceToggle(
+                    (int)swUserPreferenceToggle_e.swInputDimValOnCreate, false);
+                IDisplayDimension dim = null;
+                double? got = already ? existing : (double?)null;
+                try
+                {
+                    if (!already)
+                    {
+                        dim = modelDoc.AddDimension2(tx, ty, 0) as IDisplayDimension;
+                        try
+                        {
+                            var sd = dim == null ? null : dim.GetDimension2(0) as IDimension;
+                            if (sd != null) got = sd.SystemValue * 1000.0;
+                        }
+                        catch { }
+                    }
+                }
+                finally
+                {
+                    try
+                    {
+                        _solidWorks.SetUserPreferenceToggle(
+                            (int)swUserPreferenceToggle_e.swInputDimValOnCreate, prev);
+                    }
+                    catch { }
+                }
+
+                double want = bestCircle.R * 2000.0;
+                if ((!already && dim == null) || got == null || Math.Abs(got.Value - want) > 0.05)
+                {
+                    // Nothing unverified may print: remove it and let the legacy path try.
+                    if (dim != null) DeleteDimensionAt(modelDoc, tx, ty);
+                    ExecLog.Write($"add_drawing_dimension circle path rejected on '{bestView.Name}' " +
+                        $"(wanted Ø{want:0.##}, got {(got == null ? "unreadable" : got.Value.ToString("0.##"))})");
+                    return false;
+                }
+
+                ExecLog.Write($"add_drawing_dimension circle path OK Ø{got.Value:0.##} on " +
+                    $"'{bestView.Name}' text at ({tx * 1000:0.##},{ty * 1000:0.##})");
+
+                int sv = _guard.GetCurrentStateVersion() + 1;
+                response = new ExecutionResponse
+                {
+                    OperationId = request.OperationId,
+                    Status = "COMPLETED",
+                    Verified = true,
+                    StateVersion = sv,
+                    CadState = new CadState
+                    {
+                        StateVersion = sv,
+                        ActiveDocument = modelDoc.GetTitle(),
+                        DocumentType = "DRAWING",
+                        ActiveSketch = null,
+                        Features = new List<string>(),
+                        Dimensions = new List<string>
+                        {
+                            $"circle Ø{got.Value:0.###} mm on {bestView.Name}"
+                        }
+                    },
+                    Error = null
+                };
+                _guard.RegisterCompleted(request.OperationId, response);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ExecLog.Write("add_drawing_dimension circle path failed: " + ex.Message);
+                response = null;
+                return false;
+            }
+        }
+
+        // ---------------------------------------------------------------- delete_drawing_dimension
+        // One display dimension of a sheet, as the delete tool sees it.
+        private sealed class SheetDimRec
+        {
+            public IDisplayDimension Display;
+            public IAnnotation Annotation;
+            public string ShortName = "";      // annotation name as SolidWorks shows it: "RD2", "D1"
+            public string FullName = "";       // IDimension.FullName: "RD2@Drawing View2"
+            public string View = "";
+            public double ValueMm = -1;        // SI value read as mm, -1 when unreadable
+            public bool Diametric;
+            public double X, Y;                // sheet point of the TEXT (metres)
+            public bool HasText;
+        }
+
+        // Delete ONE dimension from the active drawing, found by NAME or by the SHEET POINT where its text
+        // sits. Called with neither, it LISTS the sheet instead of changing it: essentials cannot see the
+        // dimensions a person has already drawn (its Claim table only remembers values IT created), so
+        // listing is how a human's hand-placed dimension is found before it is removed.
+        public ExecutionResponse DeleteDrawingDimension(ToolRequest request)
+        {
+            if (_guard.IsDuplicate(request.OperationId))
+                return _guard.GetDuplicate(request.OperationId);
+
+            if (!_guard.IsStateVersionValid(request.StateVersion))
+                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                    "INVALID_STATE_VERSION", "Incoming state_version does not match current state.");
+
+            if (!EnsureConnected())
+                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                    "COM_ATTACH_FAILED", "SolidWorks process not found or COM not registered.");
+
+            try
+            {
+                var p = request.Params as JObject;
+                string name = (p?.Value<string>("name") ?? "").Trim();
+                double? px = p?.Value<double?>("px");
+                double? py = p?.Value<double?>("py");
+                double tolMm = p?.Value<double?>("tolerance_mm") ?? 3.0;
+                bool allMatches = p?.Value<bool?>("all_matching") ?? false;
+
+                var modelDoc = _solidWorks.IActiveDoc2 as IModelDoc2;
+                if (modelDoc == null)
+                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                        "NO_ACTIVE_DOCUMENT", "No active document found in SolidWorks.");
+
+                var drawingDoc = modelDoc as IDrawingDoc;
+                if (drawingDoc == null)
+                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                        "NOT_A_DRAWING", "Active document is not a drawing.");
+
+                var all = ReadSheetDimensions(drawingDoc);
+                // A point of exactly (0,0) is the sheet's lower-left corner — never a dimension text — so
+                // it is treated as "no point given" (a direct HTTP caller that omits the fields gets 0).
+                bool hasPoint = px != null && py != null &&
+                    !(Math.Abs(px.Value) < 1e-9 && Math.Abs(py.Value) < 1e-9);
+                bool listOnly = string.IsNullOrEmpty(name) && !hasPoint;
+                var targets = new List<SheetDimRec>();
+                var notes = new JArray();
+                string action = listOnly ? "listed" : "not_found";
+
+                if (!listOnly)
+                {
+                    if (!string.IsNullOrEmpty(name))
+                    {
+                        foreach (var r in all)
+                            if (NameMatches(r, name)) targets.Add(r);
+                        if (targets.Count == 0)
+                            notes.Add("no dimension on this sheet matches '" + name + "'");
+                        else if (!allMatches)
+                            targets = new List<SheetDimRec> { targets[0] };
+                    }
+                    else
+                    {
+                        // Nearest dimension TEXT to the given sheet point. The text is where a caller can
+                        // point with confidence (a dimension's graphics span the whole view).
+                        double tol = Math.Max(0.0, tolMm) / 1000.0;
+                        SheetDimRec best = null;
+                        double bestD = double.MaxValue;
+                        foreach (var r in all)
+                        {
+                            if (!r.HasText) continue;
+                            double dx = px.Value - r.X, dy = py.Value - r.Y;
+                            double d = Math.Sqrt(dx * dx + dy * dy);
+                            if (d < bestD) { bestD = d; best = r; }
+                        }
+                        if (best != null && bestD <= tol) targets.Add(best);
+                        else notes.Add(best == null
+                            ? "no dimension on this sheet carries a text position"
+                            : $"nearest dimension text is {bestD * 1000.0:0.##} mm away " +
+                              $"(tolerance {tolMm:0.##} mm)");
+                    }
+                }
+
+                var deleted = new JArray();
+                if (targets.Count > 0)
+                {
+                    modelDoc.ClearSelection2(true);
+                    foreach (var r in targets)
+                    {
+                        try
+                        {
+                            if (r.Annotation != null && r.Annotation.Select3(false, null))
+                            {
+                                modelDoc.EditDelete();
+                                deleted.Add(DimJson(r));
+                                ExecLog.Write($"delete_drawing_dimension: removed '{r.FullName}' " +
+                                    $"({r.ValueMm:0.##} mm) from '{r.View}'");
+                            }
+                        }
+                        catch { }
+                    }
+                    action = deleted.Count > 0 ? "deleted" : "not_found";
+                }
+
+                // Re-read AFTER the delete: the reply is what is provably on the sheet now.
+                var remaining = ReadSheetDimensions(drawingDoc);
+                int removed = deleted.Count;
+                var remainingDims = new JArray();
+                var dimNames = new List<string>();
+                foreach (var r in remaining)
+                {
+                    remainingDims.Add(DimJson(r));
+                    dimNames.Add(r.FullName + " = " + r.ValueMm.ToString("0.##"));
+                }
+                int sv = removed > 0 ? _guard.GetCurrentStateVersion() + 1 : _guard.GetCurrentStateVersion();
+
+                var response = new ExecutionResponse
+                {
+                    OperationId = request.OperationId,
+                    Status = "COMPLETED",
+                    Verified = true,
+                    StateVersion = sv,
+                    CadState = new CadState
+                    {
+                        StateVersion = sv,
+                        ActiveDocument = modelDoc.GetTitle(),
+                        DocumentType = "DRAWING",
+                        ActiveSketch = null,
+                        Features = new List<string>(),
+                        Dimensions = dimNames
+                    },
+                    ResultGeometry = new JObject
+                    {
+                        ["action"] = action,
+                        ["deleted_count"] = removed,
+                        ["deleted"] = deleted,
+                        ["remaining_count"] = remaining.Count,
+                        ["dimensions"] = remainingDims,
+                        ["notes"] = notes
+                    },
+                    Error = null
+                };
+
+                try { modelDoc.GraphicsRedraw2(); } catch { }
+                if (removed > 0) _guard.RegisterCompleted(request.OperationId, response);
+                return response;
+            }
+            catch (COMException ex)
+            {
+                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                    "COM_ERROR", ex.Message);
+            }
+            catch (Exception ex)
+            {
+                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                    "UNEXPECTED_ERROR", ex.Message);
+            }
+        }
+
+        // Every display dimension on the sheet, with the name/value/text-point a caller needs to address
+        // one of them. Same IDisplayDimension walk as ReadViewDimensions (GetFirstDisplayDimension5 /
+        // GetNext5); guarded per dimension so one unreadable annotation never hides the rest.
+        private List<SheetDimRec> ReadSheetDimensions(IDrawingDoc drawingDoc)
+        {
+            var list = new List<SheetDimRec>();
+            try
+            {
+                object vo = drawingDoc.GetFirstView();
+                int guard = 0;
+                while (vo != null && guard++ < 500)
+                {
+                    var v = vo as IView;
+                    object next = null;
+                    if (v != null)
+                    {
+                        try { next = v.GetNextView(); } catch { }
+                        object dObj = null;
+                        try { dObj = v.GetFirstDisplayDimension5(); } catch { }
+                        int g2 = 0;
+                        while (dObj != null && g2++ < 2000)
+                        {
+                            var dd = dObj as IDisplayDimension;
+                            object nd = null;
+                            try { nd = dd == null ? null : dd.GetNext5(); } catch { }
+                            try
+                            {
+                                var dim = dd == null ? null : dd.GetDimension2(0) as IDimension;
+                                var ann = dd == null ? null : dd.GetAnnotation() as IAnnotation;
+                                if (dim != null && ann != null)
+                                {
+                                    var r = new SheetDimRec
+                                    {
+                                        Display = dd,
+                                        Annotation = ann,
+                                        View = v.Name,
+                                        FullName = dim.FullName ?? ""
+                                    };
+                                    try { r.ShortName = ann.GetName() ?? ""; } catch { }
+                                    try { r.ValueMm = dim.SystemValue * 1000.0; } catch { r.ValueMm = -1; }
+                                    try { r.Diametric = dd.Diametric; } catch { }
+                                    try
+                                    {
+                                        var tp = ann.GetPosition() as double[];
+                                        if (tp != null && tp.Length >= 2)
+                                        {
+                                            r.X = tp[0]; r.Y = tp[1]; r.HasText = true;
+                                        }
+                                    }
+                                    catch { }
+                                    list.Add(r);
+                                }
+                            }
+                            catch { }
+                            dObj = nd;
+                        }
+                    }
+                    vo = next;
+                }
+            }
+            catch { }
+            return list;
+        }
+
+        // 'RD2' must find 'RD2@Drawing View2' (what analyze_slddrw_test prints), and the full name must
+        // work verbatim. A bare suffix match is deliberately NOT done: two views can hold the same display
+        // name, and deleting the wrong one silently removes a real dimension.
+        private static bool NameMatches(SheetDimRec r, string want)
+        {
+            if (string.IsNullOrEmpty(want)) return false;
+            if (string.Equals(r.FullName, want, StringComparison.OrdinalIgnoreCase)) return true;
+            if (string.Equals(r.ShortName, want, StringComparison.OrdinalIgnoreCase)) return true;
+            string beforeAt = r.FullName ?? "";
+            int at = beforeAt.IndexOf('@');
+            if (at > 0) beforeAt = beforeAt.Substring(0, at);
+            return string.Equals(beforeAt, want, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static JObject DimJson(SheetDimRec r)
+        {
+            var j = new JObject();
+            j["name"] = r.ShortName;
+            j["full_name"] = r.FullName;
+            j["view"] = r.View;
+            if (r.ValueMm >= 0) j["value_mm"] = R6(r.ValueMm);
+            if (r.Diametric) j["diametric"] = true;
+            if (r.HasText) j["text_mm"] = new JArray(R6(r.X * 1000.0), R6(r.Y * 1000.0));
+            return j;
+        }
+
+        // ---------------------------------------------------------------- direct circle selection
+        // Select the EDGE entity of a projected circle by its GEOMETRY instead of by a coordinate pick.
+        // WHY: IDrawingDoc hit-testing is screen-space — at view scale 0.3 a Ø4 hole is 1.2 mm on paper,
+        // and the probe kept resolving to the long horizontal edge behind it (measured: 55 consecutive
+        // 'pick WRONG line HORIZONTAL' on Part1's front view, while the same arc was pickable on a
+        // zoomed-in view). Enumerating the view's visible edges and selecting the arc whose centre and
+        // radius match the extracted circle has no hit-test tolerance at all.
+        // The centre is compared under both plausible coordinate spaces (model space via the view frame,
+        // and drawing-sheet space) — whichever matches wins; no match means the caller falls back to the
+        // coordinate probe, so this can only help.
+        private bool TrySelectCircleEntity(IModelDoc2 modelDoc, IView view, CircleRec c)
+        {
+            try
+            {
+                if (view == null || c == null) return false;
+                double scale = 1.0; try { scale = view.ScaleDecimal; } catch { }
+                var pos = view.Position as double[];
+                if (pos == null || pos.Length < 2 || scale <= 0) return false;
+                double[] fo, fxBad, fyBad;
+                if (!ViewModelFrameRaw(view, out fo, out fxBad, out fyBad) || fo == null) return false;
+
+                // THE FRAME AXES ARE AMBIGUOUS. ViewModelFrameRaw reads ArrayData[0..2] and [3..5] as the two
+                // axes, but ArrayData is a ROW-MAJOR 16-double matrix (row 1 = [a11,a12,a13,tx]), so the
+                // second axis is really [4..6] and [3..5] mixes in the translation. Both readings are tried
+                // and the GEOMETRY picks the true one — a wrong axis guess simply fails to match.
+                var axes = new List<double[]>();
+                double[] d = null;
+                try
+                {
+                    var m2v = view.ModelToViewTransform;
+                    var v2m = m2v != null ? m2v.IInverse() : null;
+                    d = v2m != null ? v2m.ArrayData as double[] : null;
+                }
+                catch { }
+                if (d != null && d.Length >= 9)
+                {
+                    axes.Add(new[] { d[0], d[1], d[2], d[4], d[5], d[6] });   // row-major: ydir = row 2
+                    axes.Add(new[] { d[0], d[1], d[2], d[3], d[4], d[5] });   // the older reading
+                }
+                else if (fxBad != null && fyBad != null)
+                {
+                    axes.Add(new[] { fxBad[0], fxBad[1], fxBad[2], fyBad[0], fyBad[1], fyBad[2] });
+                }
+
+                object raw = null;
+                try { raw = view.GetVisibleEntities2(null, 1); } catch { return false; }  // 1 = Edge
+                var ents = raw as object[];
+                if (ents == null || ents.Length == 0) return false;
+
+                IEdge best = null;
+                double bestScore = double.MaxValue;
+                IEdge onlyRadius = null;
+                int radiusHits = 0;
+                string bestAxis = "";
+                foreach (var o in ents)
+                {
+                    var edge = o as IEdge;
+                    if (edge == null) continue;
+                    ICurve curve = null;
+                    try { curve = edge.IGetCurve() as ICurve; } catch { }
+                    if (curve == null) continue;
+                    bool isCircle = false;
+                    try { isCircle = curve.IsCircle(); } catch { }
+                    if (!isCircle) continue;
+                    double[] cp = null;
+                    try { cp = curve.CircleParams as double[]; } catch { }   // centre xyz, axis xyz, radius
+                    if (cp == null || cp.Length < 7) continue;
+                    // Radius is scale-independent (GetPolylines7 is model-scale), so it identifies our circle
+                    // even when the frame maths is wrong.
+                    if (Math.Abs(cp[6] - c.R) > 1e-4) continue;
+                    radiusHits++;
+                    onlyRadius = edge;
+
+                    for (int ai = 0; ai < axes.Count; ai++)
+                    {
+                        var a = axes[ai];
+                        double ex = fo[0] + c.CX * a[0] + c.CY * a[3];
+                        double ey = fo[1] + c.CX * a[1] + c.CY * a[4];
+                        double ez = fo[2] + c.CX * a[2] + c.CY * a[5];
+                        double dd = Math.Sqrt((cp[0] - ex) * (cp[0] - ex) +
+                                              (cp[1] - ey) * (cp[1] - ey) +
+                                              (cp[2] - ez) * (cp[2] - ez));
+                        if (dd < bestScore)
+                        {
+                            bestScore = dd; best = edge;
+                            bestAxis = ai == 0 ? "row-major" : "legacy";
+                        }
+                    }
+                }
+
+                if (radiusHits == 0)
+                {
+                    ExecLog.Write($"circle entity probe: no visible arc of Ø{c.R * 2000:0.###} mm " +
+                        $"on this view ({ents.Length} edge(s))");
+                    return false;
+                }
+                if (best == null || bestScore > 1e-4)
+                {
+                    // One arc of this diameter and nothing else to confuse it with: the position match
+                    // failed, but the identity is unambiguous, so take it rather than lose the dimension.
+                    if (radiusHits == 1)
+                    {
+                        best = onlyRadius;
+                        ExecLog.Write($"circle entity probe: position match failed ({bestScore * 1000:0.###} mm) " +
+                            $"but Ø{c.R * 2000:0.###} mm is the only arc of that size — selected by radius");
+                    }
+                    else
+                    {
+                        ExecLog.Write($"circle entity probe: {radiusHits} arcs of Ø{c.R * 2000:0.###} mm and the " +
+                            $"centre match failed (best {bestScore * 1000:0.###} mm) — left to the coordinate probe");
+                        return false;
+                    }
+                }
+                else
+                {
+                    ExecLog.Write($"circle entity probe: matched Ø{c.R * 2000:0.###} mm arc " +
+                        $"({bestAxis}, {bestScore * 1000:0.###} mm)");
+                }
+                modelDoc.ClearSelection2(true);
+                bool sel = false;
+                try { sel = view.SelectEntity(best, false); } catch { }
+                if (!sel) { try { sel = ((IEntity)best).Select4(false, null); } catch { } }
+                if (!sel)
+                {
+                    ExecLog.Write("circle entity probe: matching edge found but selection failed");
+                    return false;
+                }
+                ExecLog.Write($"circle entity probe: selected Ø{c.R * 2000:0.###} mm arc");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                ExecLog.Write("circle entity probe failed: " + ex.Message);
+                return false;
+            }
+        }
+
+        // Value (mm) of the annotation whose text sits at a sheet point, or -1 when there is none or it
+        // cannot be read. Used to make circle-dimension placement idempotent and to clear a leftover.
+        private double ReadDimensionValueAt(IModelDoc2 modelDoc, double tx, double ty)
+        {
+            try
+            {
+                modelDoc.ClearSelection2(true);
+                if (!modelDoc.Extension.SelectByID2("", "DIMENSION", tx, ty, 0, false, 0, null, 0))
+                    return -1;
+                var selMgr = modelDoc.SelectionManager as ISelectionMgr;
+                var dd = selMgr == null ? null : selMgr.GetSelectedObject6(1, -1) as IDisplayDimension;
+                var sd = dd == null ? null : dd.GetDimension2(0) as IDimension;
+                modelDoc.ClearSelection2(true);
+                return sd == null ? -1 : sd.SystemValue * 1000.0;
+            }
+            catch { return -1; }
         }
 
         // analyze_slddrw_test (was analyze_drawing until 2026-07-27) — read the ACTIVE NATIVE .SLDDRW
@@ -554,6 +1192,17 @@ namespace SolidworksExecution.Services
                             var pos = view.Position as double[];
                             if (pos != null && pos.Length >= 2)
                                 vj["pos"] = new JArray { R6(pos[0]), R6(pos[1]) };
+                        }
+                        catch { }
+                        // Sheet-space bounding boxes (metres, sheet origin = 0,0). 'outline' = the real
+                        // printed footprint INCLUDING annotations (dimensions/balloons), 'sketch_outline' =
+                        // bare geometry. These are cheap (no geometry walk) and are what a caller needs to
+                        // place views without collisions and to keep dimensions off each other.
+                        try
+                        {
+                            var vo = view.GetOutline() as double[];
+                            if (vo != null && vo.Length >= 4)
+                                vj["outline"] = new JArray { R6(vo[0]), R6(vo[1]), R6(vo[2]), R6(vo[3]) };
                         }
                         catch { }
                         if (includeRelations) vj["vid"] = vid;
@@ -1970,6 +2619,21 @@ namespace SolidworksExecution.Services
             try
             {
                 var p = request.Params as JObject;
+
+                // mode="essentials" (default "model"): a CURATED, self-placed dimension set — overall
+                // envelope + hole callouts + hole positions from a baseline. It reads the projected
+                // geometry and inserts nothing from the model, because InsertModelAnnotations3 (the
+                // "model" route below) transfers every flagged model dimension (measured: 21-60 per
+                // view) and collides. See SolidWorksService.DrawingEssentials.cs for the full rationale
+                // and the verified sheet-coordinate model.
+                string mode = (p?.Value<string>("mode") ?? "model").Trim().ToLowerInvariant();
+                if (mode == "essentials")
+                    return AutoDimensionEssentials(request, p);
+                if (mode != "model")
+                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                        "INVALID_PARAMETER", $"Unknown mode '{mode}'. Use 'model' (import the model's own " +
+                        "marked dimensions) or 'essentials' (curated envelope + hole callouts + hole positions).");
+
                 bool allViews = p?.Value<bool?>("all_views") ?? true;
                 bool includeUnmarked = p?.Value<bool?>("include_unmarked") ?? false;
                 bool eliminateDuplicates = p?.Value<bool?>("eliminate_duplicates") ?? true;

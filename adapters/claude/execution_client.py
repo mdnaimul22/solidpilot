@@ -13,6 +13,8 @@ from config import (
     CONNECT_TIMEOUT,
     EXECUTION_EXE_PATH,
     SERVER_SPAWN_TIMEOUT,
+    SW_BUILD_SCRIPT,
+    SW_BUILD_TIMEOUT,
 )
 from adapter_log import write as _log
 
@@ -126,6 +128,85 @@ def _ensure_server_up() -> None:
             f"Started solidworks-execution but it did not answer {HEALTH_ENDPOINT} "
             f"within {SERVER_SPAWN_TIMEOUT}s."
         )
+
+
+def restart_server(rebuild: bool = False) -> dict:
+    """Stop the execution server, optionally rebuild the C# source, start it again, wait for /health.
+
+    This restarts the EXECUTION layer only — the process that every `solidworks.*` tool talks to over
+    HTTP. It is the sane fix for a zombie/hung server and the mandatory step after editing anything
+    under `execution/.../SolidworksExecution` (the exe on disk is what runs; a rebuild alone changes
+    nothing until the process is replaced).
+
+    It does NOT restart the MCP adapter (`server.py`): that process' stdio is owned by the MCP client,
+    so it cannot be replaced from inside a tool call — reconnect it on the client side instead
+    (OpenCode: `/mcps` → disconnect → connect, or a new session).
+
+    Order matters: kill → wait for the PORT to go quiet → (build) → start. Starting while the old
+    process still holds the HTTP.sys prefix would leave the new exe dead and the old one answering
+    with stale code. A failed build is survived: the previous exe is still on disk and is what starts.
+    """
+    out = {
+        "rebuild_requested": bool(rebuild),
+        "stopped": False,
+        "stop_output": "",
+        "port_quiet": False,
+        "build_script": SW_BUILD_SCRIPT,
+        "build_exit": None,
+        "build_tail": [],
+        "health": None,
+    }
+
+    # 1. stop every running instance (image name; SolidWorks itself is a different image and is
+    #    deliberately never touched — killing SLDWORKS.exe loses the user's unsaved work).
+    try:
+        proc = subprocess.run(
+            ["taskkill", "/F", "/IM", "SolidworksExecution.exe"],
+            capture_output=True, text=True, timeout=30,
+        )
+        txt = (proc.stdout or "") + (proc.stderr or "")
+        out["stop_output"] = " ".join(txt.split())
+        out["stopped"] = "SUCCESS" in txt.upper()
+    except Exception as ex:
+        out["stop_output"] = f"taskkill failed: {ex}"
+
+    # 2. the port must go quiet before anything is started again.
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline:
+        if not _server_is_up():
+            break
+        time.sleep(0.3)
+    out["port_quiet"] = not _server_is_up()
+
+    # 3. optional rebuild (portable Roslyn; the script owns the compiler path).
+    if rebuild:
+        if not os.path.isfile(SW_BUILD_SCRIPT):
+            out["build_exit"] = -1
+            out["build_tail"] = [f"build script not found: {SW_BUILD_SCRIPT}"]
+        else:
+            try:
+                proc = subprocess.run(
+                    ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                     "-File", SW_BUILD_SCRIPT],
+                    capture_output=True, text=True, timeout=SW_BUILD_TIMEOUT,
+                )
+                out["build_exit"] = proc.returncode
+                tail = [ln for ln in (proc.stdout or "").splitlines() if ln.strip()]
+                out["build_tail"] = tail[-15:]
+                if proc.returncode != 0 and proc.stderr:
+                    out["build_tail"] += [ln for ln in proc.stderr.splitlines() if ln.strip()][-8:]
+            except Exception as ex:
+                out["build_exit"] = -2
+                out["build_tail"] = [f"build failed to run: {ex}"]
+
+    # 4. start the exe and wait for /health (_ensure_server_up spawns detached + polls).
+    try:
+        _ensure_server_up()
+    except Exception as ex:
+        out["start_error"] = str(ex)
+        return out
+    out["health"] = get_health()
+    return out
 
 
 def _request_with_autostart(do_request, label: str):

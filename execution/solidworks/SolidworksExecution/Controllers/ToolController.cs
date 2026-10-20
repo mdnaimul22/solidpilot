@@ -155,9 +155,16 @@ namespace SolidworksExecution.Controllers
                 case "add_edge_feature":       return _service.AddEdgeFeature(request);
                 case "create_rib":             return _service.CreateRib(request);
                 case "create_drawing":         return _service.CreateDrawing(request);
+                case "set_drawing_sheet":      return _service.SetDrawingSheet(request);
+                case "add_drawing_sheet":      return _service.AddDrawingSheet(request);
+                case "add_drawing_note":       return _service.AddDrawingNote(request);
+                case "add_balloon":            return _service.AddBalloon(request);
+                case "auto_balloon":           return _service.AutoBalloon(request);
+                case "set_document_units":     return _service.SetDocumentUnits(request);
                 case "add_drawing_view":       return _service.AddDrawingView(request);
                 case "add_flat_pattern_view":  return _service.AddFlatPatternView(request);
                 case "add_drawing_dimension":  return _service.AddDrawingDimension(request);
+                case "delete_drawing_dimension": return _service.DeleteDrawingDimension(request);
                 case "auto_dimension_drawing": return _service.AutoDimensionDrawing(request);
                 case "auto_center_marks":      return _service.AutoCenterMarks(request);
                 case "add_hole_callout":       return _service.AddHoleCallout(request);

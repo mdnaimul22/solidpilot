@@ -25,7 +25,7 @@ namespace SolidworksExecution
             {
                 try
                 {
-                    string baseAddress = "http://localhost:5000/";
+                    string baseAddress = "http://localhost:5050/";
                     using (WebApp.Start<Startup>(url: baseAddress))
                     {
                         Console.WriteLine("SolidworksExecution server running at " + baseAddress);

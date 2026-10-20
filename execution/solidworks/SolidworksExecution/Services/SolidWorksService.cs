@@ -734,7 +734,7 @@ namespace SolidworksExecution.Services
 
                 if (string.IsNullOrEmpty(format))
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                        "MISSING_PARAMETER", "format is required: STEP, IGES, STL, PDF, DWG, DXF.");
+                        "MISSING_PARAMETER", "format is required: STEP, IGES, STL, PDF, DWG, DXF, PNG (any other extension SolidWorks understands also works - the format is taken from the extension).");
                 if (string.IsNullOrEmpty(filePath))
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                         "MISSING_PARAMETER", "file_path is required (full output path including filename and extension).");
