@@ -7,7 +7,7 @@ namespace SolidworksExecution.Infrastructure
         bool IsDuplicate(string operationId);
         ExecutionResponse GetDuplicate(string operationId);
         bool IsStateVersionValid(int incomingStateVersion);
-        void RegisterCompleted(string operationId, ExecutionResponse response);
+        void RegisterCompleted(string operationId, ExecutionResponse response, bool incrementsState = true);
         int GetCurrentStateVersion();
     }
 }

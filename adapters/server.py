@@ -137,23 +137,13 @@ def ensure_ready() -> str:
 # ---------------------------------------------------------------------------
 @mcp.tool(structured_output=False)
 def restart_execution_server(rebuild: bool = False) -> str:
-    """Restart the SolidWorks EXECUTION layer — the C# process (`SolidworksExecution.exe`) that every
-    other `solidworks.*` tool talks to — and optionally rebuild it from source first.
+    """Restart the SolidWorks execution server (`SolidworksExecution.exe`), optionally rebuilding it from source.
 
-    Use it after ANY change under `execution/solidworks/SolidworksExecution`: `rebuild=True` stops the
-    server, runs the portable-Roslyn build (`build.ps1`), starts the new exe and waits for `/health`.
-    `rebuild=False` just restarts it — the fix for a hung/zombie server or a stale COM attach. A failed
-    build is reported (`build_exit`, `build_tail`) and the PREVIOUS exe is still what starts, so the
-    tool never leaves the session without a server.
+    rebuild: If True, recompiles the C# execution layer before starting the server. If False (default),
+             restarts the running process to recover from hung states or stale COM connections.
 
-    This does NOT and cannot restart the MCP adapter (`server.py`): that process' stdio is owned by the
-    MCP client, and the client reads the tool list once per connection. After editing server.py,
-    reconnect the server on the client side — in OpenCode run `/mcps`, select `solidworks`,
-    disconnect, then connect (or start a new session). Nothing inside this file can do that for you.
-
-    Safe with respect to CAD state: it kills `SolidworksExecution.exe` only, never `SLDWORKS.exe`, and
-    an open document (with unsaved edits) survives the restart — the new server re-attaches via COM.
-    Returns the stop output, build exit code + last lines, `/health`, and the `ensure_ready` payload."""
+    Safe for CAD state: only restarts the execution service, keeping open SolidWorks documents intact.
+    Returns server health status and ensure_ready payload."""
     global _state_version
     body = restart_server(rebuild=rebuild)
     try:
@@ -693,9 +683,27 @@ def set_drawing_sheet(
     size: Literal["A4", "A3", "A2", "A1", "A0", "custom", ""] = "",
     orientation: Literal["landscape", "portrait"] = "landscape",
     width: Annotated[float, Field(
-        gt=0, description="Sheet width in METERS — only for size='custom'")] = 0,
+        ge=0, description="Sheet width in METERS — only for size='custom'")] = 0,
     height: Annotated[float, Field(
-        gt=0, description="Sheet height in METERS — only for size='custom'")] = 0,
+        ge=0, description="Sheet height in METERS — only for size='custom'")] = 0,
+    positions: Annotated[str, Field(
+        description="Optional JSON object mapping view name to [x, y] or [x, y, scale] in meters")] = "",
+    layout_3d_first: Annotated[bool, Field(
+        description="Automatically layout views with 3D preview first on the left")] = False,
+    part_name: Annotated[str, Field(
+        description="Override part name metadata (any language)")] = "",
+    material: Annotated[str, Field(
+        description="Override material metadata (any language)")] = "",
+    unit: Annotated[str, Field(
+        description="Override unit/quantity metadata (any language)")] = "",
+    page_format: Annotated[str, Field(
+        description="Custom page format string e.g. 'PAGE {page} / {pages}' or in any language")] = "",
+    metadata_format: Annotated[str, Field(
+        description="Custom metadata block format string in any language")] = "",
+    units_format: Annotated[str, Field(
+        description="Custom units format string in any language")] = "",
+    view_titles: Annotated[str, Field(
+        description="Optional JSON object mapping view orientation/name to custom title in any language")] = "",
 ) -> str:
     """Change a sheet's paper size and orientation in the active drawing, and/or activate it.
 
@@ -703,6 +711,9 @@ def set_drawing_sheet(
     size: 'A4','A3','A2','A1','A0','custom'; leave '' to keep the current size.
     orientation: 'landscape' (default) or 'portrait' (for 'custom', width/height win).
     width/height: sheet size in METERS, only for size='custom'.
+    positions: JSON mapping view name -> [x, y] or [x, y, scale] in meters.
+    layout_3d_first: Place 3D preview first on the left, followed by orthographic views.
+    view_titles: JSON mapping view name or orientation -> custom title string in any language.
 
     The sheet SCALE is not a parameter here: on a sheet that carries a sheet format SolidWorks'
     SetScale does not give back the ratio you asked for. Size views with add_drawing_view's own
@@ -715,6 +726,30 @@ def set_drawing_sheet(
     if size == "custom":
         params["width"] = width
         params["height"] = height
+    if positions:
+        try:
+            params["positions"] = json.loads(positions)
+        except Exception:
+            pass
+    if layout_3d_first:
+        params["layout_3d_first"] = True
+    if part_name:
+        params["part_name"] = part_name
+    if material:
+        params["material"] = material
+    if unit:
+        params["unit"] = unit
+    if page_format:
+        params["page_format"] = page_format
+    if metadata_format:
+        params["metadata_format"] = metadata_format
+    if units_format:
+        params["units_format"] = units_format
+    if view_titles:
+        try:
+            params["view_titles"] = json.loads(view_titles)
+        except Exception:
+            pass
     return _call("set_drawing_sheet", params)
 
 
@@ -947,10 +982,12 @@ def add_drawing_dimension(
     label_offset_x: float = 0.0,
     label_offset_y: float = -0.015,
 ) -> str:
-    """Add a smart dimension to a drawing view segment nearest to point (px, py).
-    Works the same way as add_dimension but operates in a drawing document context.
-    px/py should be on or very near the target segment in drawing sheet coordinates (meters).
-    Requires an active drawing document."""
+    """Add a smart dimension to the drawing entity (line, arc, circle, or edge) nearest to (px, py).
+
+    px, py: Target selection point in drawing sheet coordinates (meters) from sheet lower-left origin.
+    value: Nominal dimension value in meters.
+    label_offset_x, label_offset_y: Offset from default text placement in meters (default -0.015 in Y).
+    Requires an active drawing document with at least one view."""
     return _call(
         "add_drawing_dimension",
         {"px": px, "py": py, "value": value, "label_offset_x": label_offset_x,
@@ -969,23 +1006,16 @@ def delete_drawing_dimension(
     tolerance_mm: float = 3.0,
     all_matching: bool = False,
 ) -> str:
-    """Delete ONE dimension from the active drawing — or LIST the sheet when given no target.
+    """Delete a dimension from the active drawing, or list all existing dimensions if no target is specified.
 
-    Address the dimension in either of two ways:
-      * name   — the display name ('RD2') or the full name ('RD2@Drawing View2'), exactly as
-                 analyze_slddrw_test or this tool's own result_geometry.dimensions prints it.
-      * px/py  — the SHEET point where the dimension's TEXT sits (METRES, sheet origin = the
-                 lower-left corner of the paper). The nearest text within tolerance_mm is deleted.
+    Target selection (provide one):
+      - name: Display name (e.g. 'RD2') or full name (e.g. 'RD2@Drawing View1').
+      - px, py: Coordinates near the dimension text on the drawing sheet in meters.
 
-    Called with no target (empty name, no px/py) it CHANGES NOTHING and returns
-    result_geometry.dimensions[]: every dimension on the sheet with name, full_name, view,
-    value_mm, diametric and text_mm. Call it that way FIRST when you need to remove something a
-    PERSON drew by hand — auto_dimension_drawing's essentials mode cannot see dimensions it did
-    not create itself (clear_existing wipes ALL of them), so this is the only surgical delete path.
-
-    Returns action ('deleted' | 'listed' | 'not_found'), deleted[], remaining_count and the
-    remaining dimensions — re-read AFTER the deletion, so the reply is proof of what is on the
-    sheet now. Bumps state_version only when something was actually deleted."""
+    If called without a target (empty name and no px/py), returns all dimensions on the sheet without modifying anything.
+    tolerance_mm: Search radius in mm when selecting by coordinates (default 3.0).
+    all_matching: If True, deletes all matching dimensions; if False, deletes only the closest match.
+    Bumps state_version on deletion."""
     return _call(
         "delete_drawing_dimension",
         {"name": name, "px": px, "py": py, "tolerance_mm": tolerance_mm,
@@ -998,7 +1028,7 @@ def delete_drawing_dimension(
 # ---------------------------------------------------------------------------
 @mcp.tool(structured_output=False)
 def auto_dimension_drawing(
-    mode: str = "essentials",
+    mode: Literal["manufacturing", "center", "baseline", "baseline_holes", "raw_model_items", "essentials", "model"] = "manufacturing",
     all_views: bool = True,
     include_unmarked: bool = False,
     eliminate_duplicates: bool = True,
@@ -1008,61 +1038,23 @@ def auto_dimension_drawing(
     include_circle_diameters: bool = True,
     clear_existing: bool = False,
 ) -> str:
-    """Dimension the active drawing. TWO MODES, and they are not interchangeable.
+    """Automatically generate and place standard dimensions on views in the active drawing.
 
-    mode="essentials" (DEFAULT) — the printable-set convention taken from the client's 19 reference
-        sheets: a CURATED set, not every model dimension. It reads each ORTHOGRAPHIC view's projected
-        geometry and adds, at positions it computes itself (so they cannot overlap):
-          * overall WIDTH below the view and overall HEIGHT left of the view (the envelope),
-          * one hole callout per DISTINCT diameter ("4xØ21", "Ø28 THRU"),
-          * the hole POSITIONS as a baseline row of distinct X plus a column of distinct Y,
-          * a verified Ø dimension for every remaining CIRCLE on a view that owns no callout (a
-            small hole seen end-on, a turned profile's steps): the arc is picked by its RADIUS, the
-            diameter is read back from the geometry and deleted unless it matches, so this pass can
-            only ever print a true number.
-        THREE RULES make the result look like the references:
-          1. ONE MEASUREMENT, ONE TIME PER SHEET. A part's envelope appears in every view; measuring it
-             in two of them is the single most common defect of a hand-made sheet (the reference sheets
-             never print 406.00 twice). The first view that claims a value keeps it, the others report
-             it in result_geometry.skipped.
-          2. The hole callouts AND the hole positions go on ONE view per sheet — the view that shows
-             the most holes as circles (the face view). A neighbouring view projects those same holes
-             as plain lines, so dimensioning them there would print a second set of values; its only
-             circles are corner fillets, and calling those out produced "Ø5.00" on an end view with no
-             hole at all.
-          3. Every created value is read back and compared with the value the geometry implies; a
-             disagreeing dimension is DELETED rather than left to print a wrong number (a missed pick
-             used to turn a 38 mm hole position into the hole's 6 mm DIAMETER).
-        The shaded isometric is skipped automatically (the reference sheets never dimension it).
-        It inserts NOTHING from the model, so it never reproduces the 21-60 colliding dimensions that
-        mode="model" produces. result_geometry.created lists every dimension with the value SolidWorks
-        produced (value_mm) beside the value the geometry implies (expected_mm) and match=true/false —
-        check that before printing.
+    mode:
+      - 'manufacturing' (default): Curated production drawing set. Adds chained hole-to-hole dimensions,
+        overall envelope dimensions, and hole callouts/diameters.
+      - 'baseline': Baseline/datum dimensioning where hole positions are referenced from a primary datum edge.
+      - 'raw_model_items': Imports all driving dimensions directly from the 3D model feature sketches.
 
-    mode="model" — the raw SolidWorks 'Insert Model Items > Dimensions' transfer: EVERY driving
-        dimension marked for drawing, placed where SolidWorks wants. Use it when you deliberately
-        want the model's full dimension set, and expect a crowded sheet.
+    Parameters:
+      gap: Spacing in meters between drawing views and dimension lines (default 0.012 = 12mm).
+      include_callouts: Include hole callouts (e.g., '4x Ø8 THRU') for recognized hole patterns.
+      include_hole_positions: Include location/pitch dimensions for hole centers.
+      include_circle_diameters: Add diameter dimensions for circular features not covered by callouts.
+      clear_existing: Clear existing drawing dimensions before generating new ones (safe for re-running).
+      all_views: Apply to all views when using 'raw_model_items' mode.
 
-    Prefer 'essentials' for anything that will be printed for a client. Call after
-    create_drawing + add_drawing_view(s), then look at the page with drawing_preview and verify with
-    analyze_slddrw_test.
-
-    gap: distance in METRES between the drawing and the first dimension row (and between rows). Default 0.012 (12 mm).
-    include_callouts / include_hole_positions: turn the callout pass / the position chain off, leaving
-        only the envelope. 'essentials' only.
-    include_circle_diameters: 'essentials' only, default True. Adds a verified Ø dimension to every
-        circle the callout pass did not already cover — which is what fills in the Ø a neighbouring
-        view shows but the hole-owning view does not. Corner arcs/fillets (a circle that touches the
-        view's bounding box in both axes with nothing concentric) are skipped: a Ø on a fillet is not
-        a hole. Values are always read back from the geometry, never written by the caller.
-    clear_existing: 'essentials' only. Delete the sheet's existing display dimensions (the curated
-        dimensions AND the hole callouts) before creating the new set. This is what makes RE-RUNNING
-        safe: without it every pass piles a second copy on the sheet, which used to force a brand-new
-        drawing document per attempt. Use it whenever you refresh a sheet this mode already produced.
-    all_views / include_unmarked / eliminate_duplicates: 'model' mode only (see mode="model" above).
-
-    Returns COMPLETED with result_geometry.inserted_count and, for 'essentials', the per-dimension
-    'created' diagnostic array. Requires an active drawing with at least one model view. Bumps state_version."""
+    Requires an active drawing document with model views. Bumps state_version."""
     return _call(
         "auto_dimension_drawing",
         {"mode": mode, "all_views": all_views, "include_unmarked": include_unmarked,
@@ -1082,17 +1074,11 @@ def auto_center_marks(
     include_slots: bool = True,
     extended_lines: bool = True,
 ) -> str:
-    """Automatically place center marks (with extended centerlines) on every hole/slot in every
-    model view of the active drawing (SolidWorks 'Auto Insert > Center Marks'). This is the robust,
-    automatic way to add centerlines to a holed part's drawing — no coordinate picking. Call it
-    after the views exist (create_drawing + add_drawing_view), typically alongside
-    auto_dimension_drawing, for a difficulty-2-grade drawing of a bracket/flange with holes.
+    """Automatically place center marks and extended centerlines on holes, cylindrical bores, and slots.
 
-    include_slots: also add slot center marks/centerlines for linear & arc slots (not just round holes). Default True.
-    extended_lines: draw the extended centerlines through each hole rather than a small cross. Default True.
-
-    Returns COMPLETED with result_geometry.center_marks (total marks placed across all views; 0 if the
-    part has no holes/slots). Bumps state_version. Requires an active drawing with model views."""
+    include_slots: If True, places center marks on slots as well as circular holes (default True).
+    extended_lines: If True, draws extended centerlines through holes; if False, places simple center crosses.
+    Returns result_geometry.center_marks with total count placed. Requires an active drawing with model views."""
     return _call(
         "auto_center_marks",
         {"include_slots": include_slots, "extended_lines": extended_lines},
@@ -1104,11 +1090,9 @@ def auto_center_marks(
 # ---------------------------------------------------------------------------
 @mcp.tool(structured_output=False)
 def add_hole_callout(px: float, py: float) -> str:
-    """Insert a hole callout (e.g. '4× Ø8 THRU') on the hole edge nearest the sheet point (px, py)
-    in the active drawing. Coordinate-based selection — same fragile point pick as add_drawing_dimension
-    (KNOWN-LIMITATIONS #6), so place px/py right on the hole's projected circular edge. For centerlines
-    prefer auto_center_marks (robust/automatic); use this for explicit per-hole callouts where wanted.
-    px/py: a point on the target hole's projected circle, in drawing sheet coordinates (meters).
+    """Insert a standard hole callout annotation (e.g. '4x Ø8 THRU') on a hole edge in the active drawing.
+
+    px, py: Coordinate point on the projected circular edge of the target hole in sheet coordinates (meters).
     Requires an active drawing document. Bumps state_version."""
     return _call("add_hole_callout", {"px": px, "py": py})
 
@@ -1130,26 +1114,18 @@ def add_section_view(
     flip: bool = False,
     scale: float = 0.0,
 ) -> str:
-    """Create a SECTION VIEW that cuts the model so internal/blind features become visible, dimensionable
-    edges. Use this when a feature's size can't be shown in a projected view — most importantly a BLIND
-    POCKET's DEPTH (its floor is a hidden edge in an orthographic view, so auto_dimension_drawing can't
-    place the depth).
+    """Create a section view from an existing drawing view to expose internal geometry and blind features.
 
-    Two ways to define the cut (provide ONE pair-set):
-    - EDGE mode (edge_x, edge_y): cut collinear with an existing straight edge already projected in
-      a view — point at it.
-    - LINE mode (x1,y1 → x2,y2): draw the cut line, for cutting THROUGH a feature's interior where
-      no edge exists. It must fully cross the view through the feature.
-    All coordinates are drawing sheet coordinates in meters (KNOWN-LIMITATIONS #6 — coordinate-based).
+    Cut definition (provide one):
+      - Edge mode (edge_x, edge_y): Aligns the cut with an existing straight model edge in the parent view.
+      - Line mode (x1, y1 to x2, y2): Custom cutting line crossing completely through the feature.
+    All cut coordinates are in drawing sheet coordinates (meters).
 
-    px,py: where to place the section view (meters) — also picks which side the section projects toward.
-    label: section label (default 'A' → 'SECTION A-A'). flip: reverse the cut/viewing direction.
-    scale: optional section view scale; inherits the parent view's scale if 0/omitted.
-
-    After the section lands, call auto_dimension_drawing or add_drawing_dimension to dimension the
-    now-visible depth. Bumps state_version. Requires an active drawing with a parent model view. If it
-    returns SECTION_VIEW_FAILED, the drawing state may be wedged by prior failed attempts — a fresh
-    server/drawing state clears it."""
+    px, py: Placement location for the new section view on the sheet (meters).
+    label: Section view letter label (default 'A' -> 'SECTION A-A').
+    flip: Invert the viewing direction of the cut.
+    scale: Section view scale (0 inherits parent view scale).
+    Requires an active drawing document with a parent model view. Bumps state_version."""
     params: dict = {"px": px, "py": py, "label": label, "flip": flip}
     for k, v in (("edge_x", edge_x), ("edge_y", edge_y),
                  ("x1", x1), ("y1", y1), ("x2", x2), ("y2", y2)):
@@ -1165,15 +1141,14 @@ def add_section_view(
 # ---------------------------------------------------------------------------
 @mcp.tool(structured_output=False)
 def export_document(format: Literal["STEP", "IGES", "STL", "PDF", "DWG", "DXF", "PNG"], file_path: str) -> str:
-    """Export the active SolidWorks document to a file. The document remains open after export.
-    format: 'STEP', 'IGES', 'STL', 'PDF', 'DWG', 'DXF', 'PNG'.
-    file_path: full output path including filename and extension (e.g. 'C:/output/part.step').
-    Note: DWG and DXF require an active drawing document (use create_drawing first).
-    PDF uses SolidWorks PDF export options. STEP/IGES/STL work with part or assembly documents.
-    IGES must use a .igs extension (.iges is auto-corrected to .igs).
-    PNG is the WAY TO LOOK AT A DRAWING: a PDF's notes are written as outlines, so its text cannot be
-    extracted and the PDF itself cannot be screenshotted on this machine - export the drawing again as
-    PNG and read that. It renders the ACTIVE SHEET as one image (wider frame than the paper)."""
+    """Export the active SolidWorks document to a specified external file format.
+
+    format: Export format:
+      - Part / Assembly: 'STEP', 'IGES', 'STL', 'PDF', 'PNG'.
+      - Drawing: 'PDF', 'DWG', 'DXF', 'PNG'.
+    file_path: Full destination file path including filename and extension (e.g. 'C:/exports/part.step').
+    Note: For visual inspection of drawings, exporting to 'PNG' renders the active sheet as an image.
+    Does not modify CAD geometry or bump state_version."""
     # export does NOT change CAD state; the execution layer returns the same state_version.
     return _call("export_document", {"format": format, "file_path": file_path})
 
@@ -1183,22 +1158,11 @@ def export_document(format: Literal["STEP", "IGES", "STL", "PDF", "DWG", "DXF", 
 # ---------------------------------------------------------------------------
 @mcp.tool(structured_output=False)
 def drawing_preview(sheet: str = "") -> Image:
-    """LOOK at the active drawing - returns the ACTIVE SHEET as a real image, not a description.
+    """Render and return the active drawing sheet as an image for visual inspection and layout verification.
 
-    Call this after EVERY drawing step (add_drawing_view, add_section_view, auto_dimension_drawing,
-    add_drawing_note, add_balloon, set_drawing_sheet ...) and look at what came back before deciding
-    the next step. A text read-back only says a call succeeded; it cannot tell you that two views
-    overlap, that dimension text collides, that a view ran off the paper, that a note landed on a
-    view, or that the layout does not look like the reference. Building a sheet blind and exporting
-    a PDF at the end is how unreadable drawings get produced - by the time the PDF shows the
-    problem, the modelling decisions behind it are already wrong.
-
-    sheet: optional sheet name ('Sheet2') to activate before rendering; omit to render whichever
-    sheet is already active.
-
-    Renders the whole active sheet at a fixed height into a frame WIDER than the paper (side
-    padding), so paper-relative positions hold but the image is not a crop of the paper itself.
-    Nothing about the CAD state changes except the optional sheet activation."""
+    Use after placing views, dimensions, and annotations to verify spacing, text overlap, and layout.
+    sheet: Optional sheet name (e.g. 'Sheet2') to activate before rendering; defaults to the active sheet.
+    Requires an active drawing document with at least one view."""
     if sheet:
         _call("set_drawing_sheet", {"sheet": sheet})
 
@@ -1355,7 +1319,7 @@ def analyze_model(
 # The reader is a permanent module of the CAD-neutral planner layer (ADR-064): a drawing is design
 # intent expressed in 2D, so it belongs beside the IR schema and the recipe, not in a research dir.
 _CAD_PLANNER_PKG_DIR = os.path.normpath(os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", "..", "cad-planner"))
+    os.path.dirname(os.path.abspath(__file__)), "..", "cad-planner"))
 
 # Imported EAGERLY, at startup, in the MAIN thread -- deliberately, and NOT lazily inside the tool
 # like pycompiler is. ezdxf pulls in numpy, and loading numpy's C extensions from an MCP worker
@@ -1503,133 +1467,28 @@ def _wire_json(obj) -> str:
 @mcp.tool(structured_output=False)
 def analyze_drawing(file_path: str, save_analysis: bool = True,
                     mode: Literal["auto", "ir", "build"] = "auto") -> str:
-    """Read a 2D technical drawing — **.DXF or .DWG** — and either BUILD the part from it or hand
-    you the evidence to build it yourself. This is the drawing→part front end: a real drawing
-    arrives as DXF/DWG (a .SLDDRW is model-linked and nobody ships one), so start here for ANY
-    "build the part from this drawing" job. A .DWG is converted automatically.
+    """Analyze a 2D technical drawing (.DXF or .DWG) to extract geometry or reconstruct the 3D model.
 
-    **mode='auto' (default) returns ONE OF TWO SHAPES — the reader decides, not you:**
+    mode:
+      - 'auto' (default): Evaluates the drawing automatically:
+          * DIRECT_BUILDABLE: Returned for fully constrained flat patterns (e.g. sheet metal),
+            providing blank size, thickness, bends, and expected volume. Call mode='build' to construct.
+          * NOT_DIRECT: Returns structured drawing analysis (views, contours, loops, dimensions, notes)
+            for multi-view machined parts. Consult get_recipe('reverse') and submit_feature_graph to model.
+      - 'ir': Returns the lowered Feature Graph IR without building.
+      - 'build': Builds the part directly from the drawing in SolidWorks. Opens a new part and bumps state_version.
 
-    (A) `DIRECT_BUILDABLE` — a short plain-text summary. Every decision this drawing needs is
-        forced by the drawing itself (today: sheet-metal flat patterns), so the whole part has
-        already been lowered to Feature Graph IR deterministically. You get the blank size, the
-        thickness and its source, every bend with its edge-class corroboration, and the EXPECTED
-        VOLUME — enough to judge the build — but NOT the contour, on purpose: a real outline is
-        scores of segments and echoing it back would cost the tokens twice. Read it, then call
-        `mode='build'`. Anything the reader could not attribute is listed as SKIPPED and will not
-        be built; completing or declaring it is then yours (recipe R15).
+    Analysis Structure (when NOT_DIRECT or inspected):
+      - sheet: Units, bounding box, and overall scale factor (pre-applied to all coordinates).
+      - frame / notes: Title block text, sheet annotations, tolerances, and material specifications.
+      - views: Detected views with view-local coordinates, edge classes (visible, hidden, cut_line, center),
+        and closed loops/chains ready for sketch transcription.
+      - alignment / view_graph: Solved geometric relationships and projection alignment between views.
+      - dimensions: Extracted linear, angular, radius, and diameter dimensions with nominal values and text overrides.
+      - bend_notes: Sheet-metal bend directions (UP/DOWN), angles, radii, and associated bend lines.
 
-    (B) `NOT_DIRECT | <reason>` followed by the WHOLE analysis — the drawing needs real reading
-        (the normal path for machined parts); the reason names exactly which decision the drawing
-        left open. You get sheet/frame, every view complete (boxes, size, geometry, loops with
-        their `seq`, open chains), alignment, view_graph, every dimension, bend note and note, in
-        one answer. Read it per get_recipe('reverse') and build with submit_feature_graph.
-
-    mode='ir'    — the lowered Feature Graph IR, without building. For inspection or saving.
-    mode='build' — lower and BUILD, through the same deterministic pycompiler as
-                   submit_feature_graph. **CHANGES GEOMETRY and bumps state_version.** Opens a new
-                   part. Re-derives from the same file, so it needs no cached graph — but verify
-                   the sha256 in the summary is the file you looked at.
-
-    ⮕ Before interpreting a single number below, call `get_recipe(section='reverse')` — the TOOL,
-      not the `recipe://usage/reverse` resource, which most hosts give the model no way to read
-      (ADR-077). It holds the reading discipline (projection standard, face binding, contour gaps,
-      sheet-metal bend arithmetic) and the self-verification rules. When you then need the IR
-      vocabulary, `get_recipe('feature_graph_schema', profile='part')` is the right shape for this
-      job — it drops the assembly vocabulary and keeps every part and sheet-metal feature type.
-
-    The artifact — WHAT EVERY FIELD MEANS. (The DECISIONS you make with them are the recipe's;
-    read get_recipe('reverse') for those. Nothing is documented in both places.)
-      sheet — dxf_version, units, **scale_factor** and the sheet box. `scale_factor` is ALREADY
-        applied to every size/coordinate/dimension below, so all numbers are TRUE model mm and
-        multiplying again builds a half- or double-size part. An ANGLE is never scaled (DIMLFAC is
-        a length factor).
-        `not_read` counts what the reader saw and did NOT emit, by entity class and — for an
-        INSERT — by block name, e.g. {"HATCH": 5, "INSERT": {"WALZRICHTUNG": 1}}. Nothing vanishes
-        silently: a named block you cannot account for is evidence that exists on the sheet and
-        did not reach you.
-      frame — {paper_box, title_block_top, primitives, circles[], note_count}: the border/title
-        block cluster, which is never emitted as a view. A candidate is accepted ONLY when it
-        CONTAINS every other cluster, so `paper_box: null` means this sheet has no frame and every
-        cluster was a view candidate. A cluster in the title-block corner that no dimension points
-        at arrives as `role: "frame_item"` (a projection symbol, a weld symbol) — furniture.
-      frame_notes[] / notes[] — the sheet's text in reading order, `frame_notes` being the title
-        block's. Text INSIDE inserted blocks (SW_NOTE, BIEGETEILE, a company stamp) is included,
-        one entry per ROW, nested to any depth. The DWG route splits a row into per-glyph
-        fragments that are re-joined left to right, so match on content, not on exact spacing.
-      views[] — one per detected view: `vid`, `role`, `paper_box` (sheet coords, for reading the
-        LAYOUT), `geom_box`, `size` [w,h] in true mm, `dropped_duplicates`? (exact duplicates the
-        DWG route re-emitted), `scale_factor`? — PRESENT ONLY when this view is drawn at a ratio
-        DIFFERENT from the sheet's (a detail or section labelled 'A-A 1 : 1' on a 1:10 sheet); its
-        geometry and dimensions are already scaled with THAT factor.
-        Then `geometry` {lines, arcs, circles, ellipses} in view-local
-        true mm with the view's own bottom-left as origin. The EDGE CLASS is carried on every
-        primitive as `c`: 'visible' (near-side edge) | 'hidden' (obscured — a real feature seen
-        through material) | 'cut_line' (a section's cutting line, not part geometry) | 'center'
-        (an axis).
-        `lines` is the one array grouped BY that class instead of carrying it per record:
-        {"visible": [[index, x1, y1, x2, y2], …], "hidden": […]}. THE FIRST NUMBER IS THE INDEX —
-        the one a `seq` entry names — written in rather than implied by position, so ['l', 12, 1]
-        is found by looking for the row starting with 12, in whichever group, and never by
-        recomputing an offset. Indices run 0..n-1 across all the groups together.
-        `ellipses` {cx, cy, rx, ry, rot (+ t1, t2, x1..y2 for an arc)} are PARAMETRIC — a circle
-        on a plane tilted by θ projects with ry/rx = cos θ and rx its true radius, so a Ø10 hole
-        on a 20° face arrives as rx 5 / ry 4.699, not as 48 line segments. A record carrying
-        `n` + `fit` was recovered from an exploded fan of n segments (fit = max deviation, mm);
-        one without is a real DXF ellipse.
-        The sheet border/title block is NOT a view; a cluster INSIDE a view is that view's feature.
-      views[].loops[] — the CLOSED contours, already chained: {id, class, role outer|inner, parent,
-        area (mm^2, arc bulges exact), bbox, seq, tier?}. `seq` is [[code, index, dir], …]
-        referencing that view's own geometry arrays — the contour IN ORDER, ready to transcribe as
-        a sketch path profile. Traverse it as given; consecutive entries share an endpoint exactly.
-        `tier` is PRESENT ONLY when it is "B", so the common case costs nothing. Absent = Tier A,
-        strict chaining, which stops dead at any junction of three or more and therefore never
-        guesses. "B" = planar face traversal, run ONLY on a view whose visible graph has no free
-        end — with no dangling edge the figure is a closed planar subdivision and its faces are
-        DEFINED by the angular order of the edges at each vertex, so walking it is a reading. It
-        appears only where Tier A found nothing, and the direct-build path ignores it by design.
-      views[].open_singles[] — [position, code, index] triples: the SINGLE-segment open chains,
-        which are most of them. Nothing is abbreviated away — the id is 'O<position>', the class is
-        that primitive's own `c`, the direction is 1 — and a chain whose id/class/direction are not
-        all recoverable stays a full record in `open_chains` instead. Read the two together: a
-        primitive named here is exactly as unattributed as one in `open_chains`.
-      views[].open_chains[] — the MULTI-segment chains belonging to no contour: bend lines, centre
-        lines, and (in an ortho view) silhouette fragments the chainer refused to guess through
-        a T-junction.
-      alignment[] — GRADED view pairs: shares='x' is a vertical projection pair, 'y' a horizontal
-        one, and `grade` says how strong the evidence is. 'span' = the two share that axis's span
-        edge-for-edge, the strongest. 'mid' = only the midpoints coincide — still a measurement,
-        but silhouette ends may genuinely differ, and on a bend-note sheet a mid pair may relate
-        the FLAT and the BENT state (two states of the part, not two projections). 'label' = a
-        section caption ties the section view `b` to the view `a` carrying its cut line, with
-        shares=null, so it survives a cross-scale section.
-      view_graph — {solved, views:{vid: [h_axis, v_axis]}} when the pairs pin every view's two
-        paper axes onto the part's three. TOPOLOGY ONLY, over ANONYMOUS axes ax0/ax1/ax2: which
-        axis is depth and which view is "front" is the projection convention's SIGN, not a field.
-        `solved: false` names why, and the joining is yours again.
-      dimensions[] — `value` (TRUE), `kind` (linear|aligned|angular|diameter|radius|ordinate),
-        `defpts` (the dimension's own reference points, sheet coords) and the owning `view`.
-        `printed` is the string the CAD system actually DREW, taken from the dimension's own
-        block, with `%%c`→Ø, `%%d`→°, `%%p`→± decoded (the symbol is evidence about what was
-        dimensioned); `text` beside it is the raw undecoded override (e.g. '8x <>' = a count).
-        The DWG→DXF route corrupts the stored measurement in two whole classes — an ANGULAR value
-        comes back as 180+θ, a RADIUS loses its arc side — so the reader ARBITRATES: for radius and
-        diameter the printed value wins outright, and for an angle it takes the candidate ≤ 180°.
-        `printed_mismatch: true` marks what it could not settle.
-        `kind_from: "printed"` marks a dimension whose TYPE the drawn symbol overruled — a plain
-        linear dim drawn across a circle with a hand-typed Ø is re-emitted as `kind: "diameter"`.
-        `measures` links a dimension to the primitive the reader matched it to.
-      bend_notes[] — sheet metal: {dir UP|DOWN, angle_deg, radius, view} plus either `bend_line`
-        (the line it annotates, that line's edge class, and `in_loop` — true would mean the match
-        landed on outline geometry, which a bend line never is) or `unpaired` with the reason and
-        the candidates. Direction comes from the NOTE; the class corroborates it.
-      notes[] — other free text on the sheet (e.g. a bare '2 mm' thickness note, 'SECTION C-C'),
-        text inside note blocks included.
-
-    file_path: absolute path to the .DXF or .DWG.
-    save_analysis (default True): also write `<name>.analysis-v<version>.json` beside the source —
-        a research artifact for cross-part study, versioned by the analyzer. Same version
-        overwrites. You never need to read it back: this answer already carries everything in it."""
+    file_path: Absolute path to the .DXF or .DWG drawing file.
+    save_analysis: If True (default), saves a cached JSON analysis artifact alongside the source file."""
     src = os.path.abspath(file_path)
     if not os.path.exists(src):
         return f"FAILED | FILE_NOT_FOUND | {src}"
@@ -2120,7 +1979,7 @@ def activate_document(title: str) -> str:
 # provenance, is gitignored, and only the PUBLIC `-usage` twin appears on this surface.
 # ---------------------------------------------------------------------------
 _CAD_PLANNER_DIR = os.path.normpath(os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "..", "..", "cad-planner"))
+    os.path.dirname(os.path.abspath(__file__)), "..", "cad-planner"))
 
 # The served section slugs, EXPLICIT (this replaces get_recipe's `Literal[...]`). The surface is
 # under the user's control by decision: a new `## slug — title` in recipe-usage.md does NOT

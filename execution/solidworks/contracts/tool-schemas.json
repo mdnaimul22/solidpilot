@@ -5,10 +5,10 @@
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
    "params": {
-    "template_path": "string (optional \u2014 full path to a part template; uses the default part template if omitted)"
+    "template_path": "string (optional — full path to a part template; uses the default part template if omitted)"
    }
   },
-  "output": "\u2192 see execution-response.json"
+  "output": "→ see execution-response.json"
  },
  "open_document": {
   "description": "Opens an EXISTING file from disk (counterpart to open_new_part, which makes a blank doc). Native .sldprt/.sldasm/.slddrw open directly by type (from the extension). Foreign formats use a STAGED import (2026-07-09, proven live): OpenDoc6 first; on null (with 3D Interconnect issues OpenDoc6 returns errors=2097152 swFileRequiresRepairError even for valid files) fall back to LoadFile4 = the CLASSIC translator (STEP/IGES/NX .prt proven); as a last resort enable Interconnect (toggle 691) and retry once. as_assembly=true (foreign only): an ASSEMBLY STEP - the classic translator would import it as a MULTIBODY PART, so Interconnect is enabled just for that open (toggle restored after). Makes the opened document active and bumps state_version.",
@@ -16,30 +16,30 @@
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
    "params": {
-    "file_path": "string (required \u2014 full path to the file to open; .sldprt/.sldasm/.slddrw native, .ipt/.CATPart/STEP/IGES/Parasolid imported as a part via 3D Interconnect)",
+    "file_path": "string (required — full path to the file to open; .sldprt/.sldasm/.slddrw native, .ipt/.CATPart/STEP/IGES/Parasolid imported as a part via 3D Interconnect)",
     "as_assembly": "boolean (optional, default false - foreign files only: import an assembly STEP as a real ASSEMBLY via 3D Interconnect instead of the classic multibody-part import; NOTE on this install OpenDoc6-via-Interconnect currently fails with swFileRequiresRepairError - the fallback path for assembly ground truth is per-part import + STEP-parsed placements)"
    }
   },
-  "output": "\u2192 see execution-response.json \u2014 CadState.ActiveDocument = opened doc title; DocumentType = PART/ASSEMBLY/DRAWING; Features[0] = file name"
+  "output": "→ see execution-response.json — CadState.ActiveDocument = opened doc title; DocumentType = PART/ASSEMBLY/DRAWING; Features[0] = file name"
  },
  "create_sketch": {
-  "description": "Creates a new sketch on a plane OR on an existing model face. Default: plane name. With on_face=true, select the face by face_index (PREFERRED \u2014 the i-th face from analyze_model(faces); robust on revolve end-caps where a coordinate pick is ambiguous) or by a point (face_x,face_y,face_z) on the planar face. Enables sketching on existing geometry (e.g. a recess/hub on a part face, a bore on a shaft end). Auto-exits any active sketch first.",
+  "description": "Creates a new sketch on a plane OR on an existing model face. Default: plane name. With on_face=true, select the face by face_index (PREFERRED — the i-th face from analyze_model(faces); robust on revolve end-caps where a coordinate pick is ambiguous) or by a point (face_x,face_y,face_z) on the planar face. Enables sketching on existing geometry (e.g. a recess/hub on a part face, a bore on a shaft end). Auto-exits any active sketch first.",
   "input": {
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
    "params": {
-    "plane": "string (plane mode \u2014 e.g. Front Plane, Top Plane, Right Plane, or a named ref plane like Plane1; required unless on_face)",
-    "on_face": "boolean (optional, default false \u2014 sketch on a model face instead of a plane)",
-    "face_index": "integer (on_face, PREFERRED \u2014 index of the target face from analyze_model(faces); bypasses coordinate picking. Takes priority over face_x/y/z)",
-    "face_x": "number (on_face \u2014 X of a point ON the target planar face, meters)",
-    "face_y": "number (on_face \u2014 Y of a point ON the target planar face, meters)",
-    "face_z": "number (on_face \u2014 Z of a point ON the target planar face, meters)"
+    "plane": "string (plane mode — e.g. Front Plane, Top Plane, Right Plane, or a named ref plane like Plane1; required unless on_face)",
+    "on_face": "boolean (optional, default false — sketch on a model face instead of a plane)",
+    "face_index": "integer (on_face, PREFERRED — index of the target face from analyze_model(faces); bypasses coordinate picking. Takes priority over face_x/y/z)",
+    "face_x": "number (on_face — X of a point ON the target planar face, meters)",
+    "face_y": "number (on_face — Y of a point ON the target planar face, meters)",
+    "face_z": "number (on_face — Z of a point ON the target planar face, meters)"
    }
   },
-  "output": "\u2192 see execution-response.json"
+  "output": "→ see execution-response.json"
  },
  "add_sketch_entity": {
-  "description": "Adds a sketch entity to the active sketch. Supported types: 'rectangle' (x1,y1,x2,y2), 'circle' (cx,cy,radius), 'line' (x1,y1,x2,y2), 'arc' (x1,y1 start, x2,y2 end, xm,ym mid-arc point), 'arc_center' (cx,cy exact center, x1,y1 start, x2,y2 end, direction +1 CCW/-1 CW \u2014 radius-exact, stable for shallow arcs; created with SketchManager.AddToDB=true so SW input inference/snapping cannot skew the radius), 'ellipse' (cx,cy center, x1,y1 major-axis point, x2,y2 minor-axis point), 'spline' (points=[x1,y1,...] through-points), 'fillet' (vx,vy vertex to round, radius), 'chamfer' (vx,vy vertex to cut, distance). Mirror of analyze_model's sketch-segment output (every emitted segment kind maps to an entity_type here). On COMPLETED the response carries result_geometry: the REAL created geometry read back from SW (not the input) for in-band self-verification. New entity types are added at the execution layer without changing this schema.",
+  "description": "Adds a sketch entity to the active sketch. Supported types: 'rectangle' (x1,y1,x2,y2), 'circle' (cx,cy,radius), 'line' (x1,y1,x2,y2), 'arc' (x1,y1 start, x2,y2 end, xm,ym mid-arc point), 'arc_center' (cx,cy exact center, x1,y1 start, x2,y2 end, direction +1 CCW/-1 CW — radius-exact, stable for shallow arcs; created with SketchManager.AddToDB=true so SW input inference/snapping cannot skew the radius), 'ellipse' (cx,cy center, x1,y1 major-axis point, x2,y2 minor-axis point), 'spline' (points=[x1,y1,...] through-points), 'fillet' (vx,vy vertex to round, radius), 'chamfer' (vx,vy vertex to cut, distance). Mirror of analyze_model's sketch-segment output (every emitted segment kind maps to an entity_type here). On COMPLETED the response carries result_geometry: the REAL created geometry read back from SW (not the input) for in-band self-verification. New entity types are added at the execution layer without changing this schema.",
   "input": {
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
@@ -59,21 +59,21 @@
     "distance": "number (chamfer: equal distance on both sides)",
     "direction": "number (arc_center: sweep sense from start to end, +1 CCW / -1 CW; default +1; ignored by other types)",
     "points": "string (spline: JSON array of flat through-points '[x1,y1,x2,y2,...]', >= 2 points; parsed by the adapter into a number array; ignored by other types)",
-    "construction": "boolean (optional, default false \u2014 convert the created entity to CONSTRUCTION/reference geometry; mirrors analyze_model's per-segment 'construction' flag so analyzed construction entities can be reproduced)"
+    "construction": "boolean (optional, default false — convert the created entity to CONSTRUCTION/reference geometry; mirrors analyze_model's per-segment 'construction' flag so analyzed construction entities can be reproduced)"
    }
   },
-  "output": "\u2192 see execution-response.json (add_sketch_entity additionally returns result_geometry: the real created segment geometry, read-only \u2014 does NOT affect state_version)"
+  "output": "→ see execution-response.json (add_sketch_entity additionally returns result_geometry: the real created segment geometry, read-only — does NOT affect state_version)"
  },
  "add_sketch_entities": {
-  "description": "Batch form of add_sketch_entity: creates MANY sketch entities in the active sketch in ONE call. 'segments' is an array of entity records, each record = add_sketch_entity's params for one entity (entity_type + its coordinates; per-record 'construction' supported; a spline record's 'points' is a plain number array). Records are created in array order under ONE AddToDB bracket. NOT transactional: on the first failing record the call returns FAILED naming segments[i] and how many earlier records were created (they remain in the sketch); state_version bumps only on COMPLETED. result_geometry echoes a compact {segment_count, counts per entity_type} \u2014 no per-segment geometry (use analyze_model sketch mode for exact readback).",
+  "description": "Batch form of add_sketch_entity: creates MANY sketch entities in the active sketch in ONE call. 'segments' is an array of entity records, each record = add_sketch_entity's params for one entity (entity_type + its coordinates; per-record 'construction' supported; a spline record's 'points' is a plain number array). Records are created in array order under ONE AddToDB bracket. NOT transactional: on the first failing record the call returns FAILED naming segments[i] and how many earlier records were created (they remain in the sketch); state_version bumps only on COMPLETED. result_geometry echoes a compact {segment_count, counts per entity_type} — no per-segment geometry (use analyze_model sketch mode for exact readback).",
   "input": {
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
    "params": {
-    "segments": "string (required \u2014 JSON array of entity records '[{\"entity_type\":\"line\",\"x1\":0,...},...]'; parsed by the adapter into an object array)"
+    "segments": "string (required — JSON array of entity records '[{\"entity_type\":\"line\",\"x1\":0,...},...]'; parsed by the adapter into an object array)"
    }
   },
-  "output": "\u2192 see execution-response.json (add_sketch_entities returns result_geometry: {segment_count, counts})"
+  "output": "→ see execution-response.json (add_sketch_entities returns result_geometry: {segment_count, counts})"
  },
  "add_sketch_constraint": {
   "description": "Applies a geometric constraint to sketch entities in the active sketch. Single-entity constraints (horizontal, vertical) need only px1/py1. Two-entity constraints (coincident, parallel, perpendicular, tangent, equal, midpoint) also require px2/py2. entity_type1/2 defaults to 'SKETCHSEGMENT'; use 'SKETCHPOINT' for point-based constraints.",
@@ -82,15 +82,15 @@
    "state_version": "integer (required, must match current execution state)",
    "params": {
     "constraint_type": "string (required: 'horizontal', 'vertical', 'coincident', 'parallel', 'perpendicular', 'tangent', 'equal', 'midpoint')",
-    "px1": "number (required \u2014 X coordinate of point on first entity)",
-    "py1": "number (required \u2014 Y coordinate of point on first entity)",
-    "px2": "number (optional \u2014 X coordinate of point on second entity; required for two-entity constraints)",
-    "py2": "number (optional \u2014 Y coordinate of point on second entity; required for two-entity constraints)",
-    "entity_type1": "string (optional, default 'SKETCHSEGMENT' \u2014 'SKETCHSEGMENT' or 'SKETCHPOINT')",
-    "entity_type2": "string (optional, default 'SKETCHSEGMENT' \u2014 'SKETCHSEGMENT' or 'SKETCHPOINT')"
+    "px1": "number (required — X coordinate of point on first entity)",
+    "py1": "number (required — Y coordinate of point on first entity)",
+    "px2": "number (optional — X coordinate of point on second entity; required for two-entity constraints)",
+    "py2": "number (optional — Y coordinate of point on second entity; required for two-entity constraints)",
+    "entity_type1": "string (optional, default 'SKETCHSEGMENT' — 'SKETCHSEGMENT' or 'SKETCHPOINT')",
+    "entity_type2": "string (optional, default 'SKETCHSEGMENT' — 'SKETCHSEGMENT' or 'SKETCHPOINT')"
    }
   },
-  "output": "\u2192 see execution-response.json"
+  "output": "→ see execution-response.json"
  },
  "add_dimension": {
   "description": "Applies a smart dimension to a sketch segment by selecting it via a point on the segment. px/py must lie on or very near the target segment (e.g. the midpoint of a line). This approach works reliably for any sketch geometry, not just simple rectangles.",
@@ -101,95 +101,95 @@
     "px": "number (X coordinate of a point on the target segment, in document units)",
     "py": "number (Y coordinate of a point on the target segment, in document units)",
     "value": "number (dimension value in document units)",
-    "label_offset_x": "number (optional, default 0.0 \u2014 X offset from px for the dimension label position)",
-    "label_offset_y": "number (optional, default -0.015 \u2014 Y offset from py for the dimension label position)"
+    "label_offset_x": "number (optional, default 0.0 — X offset from px for the dimension label position)",
+    "label_offset_y": "number (optional, default -0.015 — Y offset from py for the dimension label position)"
    }
   },
-  "output": "\u2192 see execution-response.json"
+  "output": "→ see execution-response.json"
  },
  "extrude_feature": {
-  "description": "Creates a 3D feature from the active sketch profile. Exits sketch mode automatically. feature_type discriminator: 'boss' (solid extrusion, default), 'cut' (material removal, requires existing solid body), 'revolve' (solid of revolution \u2014 requires angle and axis coords), 'sweep' (swept solid \u2014 requires path_sketch name), 'loft' (lofted solid \u2014 requires profiles JSON array of \u22652 sketch names).",
+  "description": "Creates a 3D feature from the active sketch profile. Exits sketch mode automatically. feature_type discriminator: 'boss' (solid extrusion, default), 'cut' (material removal, requires existing solid body), 'revolve' (solid of revolution — requires angle and axis coords), 'sweep' (swept solid — requires path_sketch name), 'loft' (lofted solid — requires profiles JSON array of ≥2 sketch names).",
   "input": {
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
    "params": {
-    "depth": "number (required for boss/cut \u2014 extrusion/cut depth in document units)",
+    "depth": "number (required for boss/cut — extrusion/cut depth in document units)",
     "feature_type": "string (optional, default 'boss': 'boss' | 'cut' | 'revolve' | 'sweep' | 'loft')",
-    "angle": "number (revolve only \u2014 revolution angle in DEGREES, default 360 = full revolve)",
-    "axis_x1": "number (revolve only \u2014 X of first endpoint of centerline segment)",
-    "axis_y1": "number (revolve only \u2014 Y of first endpoint of centerline segment)",
-    "axis_x2": "number (revolve only \u2014 X of second endpoint of centerline segment)",
-    "axis_y2": "number (revolve only \u2014 Y of second endpoint of centerline segment; default 0.001)",
-    "path_sketch": "string (sweep only \u2014 name of the sketch containing the sweep path)",
-    "profiles": "string (loft only \u2014 JSON array of sketch names e.g. '[\"Sketch1\",\"Sketch2\"]', minimum 2)",
-    "reverse": "boolean (boss/cut \u2014 flip feature direction; needed for a cut/boss sketched on a part face where material is on the opposite side)",
-    "through": "boolean (boss/cut \u2014 through-all end condition; depth ignored)",
-    "up_to_face_index": "integer (optional, default -1 = off; boss/cut \u2014 >= 0 selects the UP-TO-SURFACE end condition terminating exactly on that model face; index from analyze_model(faces), same enumeration as create_sketch face_index; depth ignored. The face is append-selected with Mark=1, the FeatureExtrusion3/FeatureCut4 end-condition reference mark)",
-    "mid_plane": "boolean (optional, default false; boss/cut \u2014 swEndCondMidPlane: extrudes SYMMETRICALLY about the sketch plane, depth = TOTAL width; conflicts with through/up_to_face_index)"
+    "angle": "number (revolve only — revolution angle in DEGREES, default 360 = full revolve)",
+    "axis_x1": "number (revolve only — X of first endpoint of centerline segment)",
+    "axis_y1": "number (revolve only — Y of first endpoint of centerline segment)",
+    "axis_x2": "number (revolve only — X of second endpoint of centerline segment)",
+    "axis_y2": "number (revolve only — Y of second endpoint of centerline segment; default 0.001)",
+    "path_sketch": "string (sweep only — name of the sketch containing the sweep path)",
+    "profiles": "string (loft only — JSON array of sketch names e.g. '[\"Sketch1\",\"Sketch2\"]', minimum 2)",
+    "reverse": "boolean (boss/cut — flip feature direction; needed for a cut/boss sketched on a part face where material is on the opposite side)",
+    "through": "boolean (boss/cut — through-all end condition; depth ignored)",
+    "up_to_face_index": "integer (optional, default -1 = off; boss/cut — >= 0 selects the UP-TO-SURFACE end condition terminating exactly on that model face; index from analyze_model(faces), same enumeration as create_sketch face_index; depth ignored. The face is append-selected with Mark=1, the FeatureExtrusion3/FeatureCut4 end-condition reference mark)",
+    "mid_plane": "boolean (optional, default false; boss/cut — swEndCondMidPlane: extrudes SYMMETRICALLY about the sketch plane, depth = TOTAL width; conflicts with through/up_to_face_index)"
    }
   },
-  "output": "\u2192 see execution-response.json"
+  "output": "→ see execution-response.json"
  },
  "create_rib": {
-  "description": "Creates a RIB feature from the ACTIVE sketch (consumed, like extrude_feature). The profile is OPEN geometry \u2014 typically a single line whose extensions hit existing walls (e.g. the diagonal of an L-bracket); SolidWorks extends and thickens it. Uses IFeatureManager.InsertRib (void-returning \u2014 creation is verified from the feature tree; a no-op result is retried with the material direction flipped before failing RIB_FAILED). Draft parameters deliberately not exposed in v1.",
+  "description": "Creates a RIB feature from the ACTIVE sketch (consumed, like extrude_feature). The profile is OPEN geometry — typically a single line whose extensions hit existing walls (e.g. the diagonal of an L-bracket); SolidWorks extends and thickens it. Uses IFeatureManager.InsertRib (void-returning — creation is verified from the feature tree; a no-op result is retried with the material direction flipped before failing RIB_FAILED). Draft parameters deliberately not exposed in v1.",
   "input": {
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
    "params": {
-    "thickness": "number (required \u2014 rib thickness in meters, > 0)",
-    "two_sided": "boolean (optional, default true \u2014 thicken symmetrically on both sides of the sketch; false = single-sided, see reverse_thickness_dir)",
-    "reverse_thickness_dir": "boolean (optional, default false \u2014 single-sided only: thicken the opposite side of the sketch normal)",
-    "reverse_material_dir": "boolean (optional, default false \u2014 flip which side the rib material fills toward; auto-retry covers a wrong guess)",
-    "is_norm_to_sketch": "boolean (optional, default false \u2014 false = extrusion parallel to sketch (classic line rib), true = normal to sketch)"
+    "thickness": "number (required — rib thickness in meters, > 0)",
+    "two_sided": "boolean (optional, default true — thicken symmetrically on both sides of the sketch; false = single-sided, see reverse_thickness_dir)",
+    "reverse_thickness_dir": "boolean (optional, default false — single-sided only: thicken the opposite side of the sketch normal)",
+    "reverse_material_dir": "boolean (optional, default false — flip which side the rib material fills toward; auto-retry covers a wrong guess)",
+    "is_norm_to_sketch": "boolean (optional, default false — false = extrusion parallel to sketch (classic line rib), true = normal to sketch)"
    }
   },
-  "output": "\u2192 see execution-response.json (returns the created rib feature name; result_geometry {volume, faces, edges} after the rib)"
+  "output": "→ see execution-response.json (returns the created rib feature name; result_geometry {volume, faces, edges} after the rib)"
  },
  "add_edge_feature": {
-  "description": "Applies a 3D edge modifier to solid body edges. Operates post-extrusion on the solid, NOT on sketch segments. feature_type='fillet': rounds edge(s) with radius_or_distance as radius. feature_type='chamfer': cuts a chamfer \u2014 chamfer_type='distance_angle' (setback + angle, default 45\u00b0) or 'distance_distance' (D1 + distance2, directional, chamfer_flip swaps sides). PREFERRED edge selection: edge_indices (JSON array of integer indices from analyze_model(edges)) \u2014 robust for crowded/concave (inner-corner, small-radius) edges that coordinate picks can't disambiguate. Fallback: ex/ey/ez (single) or edges_json (multiple {ex,ey,ez}).",
+  "description": "Applies a 3D edge modifier to solid body edges. Operates post-extrusion on the solid, NOT on sketch segments. feature_type='fillet': rounds edge(s) with radius_or_distance as radius. feature_type='chamfer': cuts a chamfer — chamfer_type='distance_angle' (setback + angle, default 45°) or 'distance_distance' (D1 + distance2, directional, chamfer_flip swaps sides). PREFERRED edge selection: edge_indices (JSON array of integer indices from analyze_model(edges)) — robust for crowded/concave (inner-corner, small-radius) edges that coordinate picks can't disambiguate. Fallback: ex/ey/ez (single) or edges_json (multiple {ex,ey,ez}).",
   "input": {
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
    "params": {
     "feature_type": "string (required: 'fillet' or 'chamfer')",
-    "radius_or_distance": "number (required \u2014 fillet radius, or chamfer first-face setback D1, in meters)",
-    "edge_indices": "string (optional, PREFERRED \u2014 JSON array of integer edge indices from analyze_model(edges), e.g. '[3,5]'; bypasses coordinate picking. Takes priority over edges_json/ex-ey-ez)",
+    "radius_or_distance": "number (required — fillet radius, or chamfer first-face setback D1, in meters)",
+    "edge_indices": "string (optional, PREFERRED — JSON array of integer edge indices from analyze_model(edges), e.g. '[3,5]'; bypasses coordinate picking. Takes priority over edges_json/ex-ey-ez)",
     "ex": "number (single-edge: X coordinate of point on target edge)",
     "ey": "number (single-edge: Y coordinate of point on target edge)",
     "ez": "number (single-edge: Z coordinate of point on target edge)",
-    "edges_json": "string (optional \u2014 JSON array of {ex,ey,ez} objects for multiple edges, overrides single ex/ey/ez if non-empty)",
+    "edges_json": "string (optional — JSON array of {ex,ey,ez} objects for multiple edges, overrides single ex/ey/ez if non-empty)",
     "chamfer_type": "string (chamfer only: 'distance_angle' (default) | 'distance_distance')",
     "angle": "number (chamfer distance_angle only: chamfer angle in DEGREES, default 45)",
     "distance2": "number (chamfer distance_distance only: second-face setback D2 in meters, required > 0 there)",
     "chamfer_flip": "boolean (chamfer only: swap which face gets D1 vs D2 / flip direction, default false)"
    }
   },
-  "output": "\u2192 see execution-response.json"
+  "output": "→ see execution-response.json"
  },
  "create_drawing": {
-  "description": "Opens a new SolidWorks drawing document at the requested sheet size/orientation (default A3 landscape). model_path is optional \u2014 an empty drawing is created if omitted. add_drawing_view requires the referenced part to be saved to disk. The sheet is created EMPTY: no border, no title block (add them as notes).",
+  "description": "Opens a new SolidWorks drawing document at the requested sheet size/orientation (default A3 landscape). model_path is optional — an empty drawing is created if omitted. add_drawing_view requires the referenced part to be saved to disk. The sheet is created EMPTY: no border, no title block (add them as notes).",
   "input": {
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
    "params": {
-    "model_path": "string (optional \u2014 full path to the part/assembly to reference; empty drawing created if omitted)",
-    "sheet_size": "string (optional, default 'A3' \u2014 'A4','A3','A2','A1','A0'; a CUSTOM size is not available here, use set_drawing_sheet afterwards)",
-    "orientation": "string (optional, default 'landscape' \u2014 'landscape'|'portrait')"
+    "model_path": "string (optional — full path to the part/assembly to reference; empty drawing created if omitted)",
+    "sheet_size": "string (optional, default 'A3' — 'A4','A3','A2','A1','A0'; a CUSTOM size is not available here, use set_drawing_sheet afterwards)",
+    "orientation": "string (optional, default 'landscape' — 'landscape'|'portrait')"
    }
   },
-  "output": "\u2192 see execution-response.json \u2014 result_geometry = {sheet_size, orientation, width, height, sheet_count} read back from the sheet"
+  "output": "→ see execution-response.json — result_geometry = {sheet_size, orientation, width, height, sheet_count} read back from the sheet"
  },
  "set_document_units": {
-  "description": "Sets the DOCUMENT units of the ACTIVE document (part/assembly/drawing) \u2014 the setting that decides which unit the dimension text is drawn in. For a drawing, call this right after create_drawing so dimensions read in mm instead of the default template's units.",
+  "description": "Sets the DOCUMENT units of the ACTIVE document (part/assembly/drawing) — the setting that decides which unit the dimension text is drawn in. For a drawing, call this right after create_drawing so dimensions read in mm instead of the default template's units.",
   "input": {
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
    "params": {
-    "linear": "string (optional, default 'mm' \u2014 'mm','cm','m','in','ft','micron','mil','uin'; also accepts 'inch'/'inches')",
-    "decimals": "integer (optional, default 2, 0-6 \u2014 decimal places for linear dimensions)"
+    "linear": "string (optional, default 'mm' — 'mm','cm','m','in','ft','micron','mil','uin'; also accepts 'inch'/'inches')",
+    "decimals": "integer (optional, default 2, 0-6 — decimal places for linear dimensions)"
    }
   },
-  "output": "\u2192 see execution-response.json \u2014 result_geometry = {linear, decimals} read back from the document"
+  "output": "→ see execution-response.json — result_geometry = {linear, decimals} read back from the document"
  },
  "set_drawing_sheet": {
   "description": "Changes the paper size and orientation of a sheet in the ACTIVE drawing. Also ACTIVATES the sheet named by 'sheet' (passing only 'sheet' changes nothing else). The sheet SCALE is deliberately out of reach here - see the drawings reference.",
@@ -197,14 +197,23 @@
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
    "params": {
-    "sheet": "string (optional \u2014 sheet name to activate; default = the current sheet)",
-    "size": "string (optional \u2014 'A4','A3','A2','A1','A0','custom'; omit to keep the current size)",
-    "orientation": "string (optional, default 'landscape' \u2014 'landscape'|'portrait')",
-    "width": "number (optional, meters \u2014 only for size='custom')",
-    "height": "number (optional, meters \u2014 only for size='custom')"
+    "sheet": "string (optional — sheet name to activate; default = the current sheet)",
+    "size": "string (optional — 'A4','A3','A2','A1','A0','custom'; omit to keep the current size)",
+    "orientation": "string (optional, default 'landscape' — 'landscape'|'portrait')",
+    "width": "number (optional, meters — only for size='custom')",
+    "height": "number (optional, meters — only for size='custom')",
+    "positions": "string (optional — JSON object mapping view name to [x, y] or [x, y, scale] in meters)",
+    "layout_3d_first": "boolean (optional, default false — automatically layout views with 3D preview first on the left)",
+    "part_name": "string (optional — override part name metadata)",
+    "material": "string (optional — override material metadata)",
+    "unit": "string (optional — override unit/quantity metadata)",
+    "page_format": "string (optional — custom page format string e.g. 'PAGE {page} / {pages}')",
+    "metadata_format": "string (optional — custom metadata block format string)",
+    "units_format": "string (optional — custom units format string)",
+    "view_titles": "string (optional — JSON object mapping view orientation/name to custom title)"
    }
   },
-  "output": "\u2192 see execution-response.json \u2014 result_geometry = {sheet, sheet_count, paper, width, height}"
+  "output": "→ see execution-response.json — result_geometry = {sheet, sheet_count, paper, width, height}"
  },
  "add_drawing_sheet": {
   "description": "Adds a NEW sheet to the ACTIVE drawing (multi-page packet: one part/assembly per page). The new sheet becomes active unless activate=false.",
@@ -212,55 +221,55 @@
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
    "params": {
-    "name": "string (optional \u2014 new sheet name; default 'Sheet<N>')",
-    "size": "string (optional, default 'A4' \u2014 'A4','A3','A2','A1','A0','custom')",
-    "orientation": "string (optional, default 'landscape' \u2014 'landscape'|'portrait')",
-    "width": "number (optional, meters \u2014 only for size='custom')",
-    "height": "number (optional, meters \u2014 only for size='custom')",
-    "activate": "boolean (optional, default true \u2014 make the new sheet the active one)"
+    "name": "string (optional — new sheet name; default 'Sheet<N>')",
+    "size": "string (optional, default 'A4' — 'A4','A3','A2','A1','A0','custom')",
+    "orientation": "string (optional, default 'landscape' — 'landscape'|'portrait')",
+    "width": "number (optional, meters — only for size='custom')",
+    "height": "number (optional, meters — only for size='custom')",
+    "activate": "boolean (optional, default true — make the new sheet the active one)"
    }
   },
-  "output": "\u2192 see execution-response.json \u2014 result_geometry = {sheet, sheet_count, paper, width, height}"
+  "output": "→ see execution-response.json — result_geometry = {sheet, sheet_count, paper, width, height}"
  },
  "add_drawing_note": {
-  "description": "Inserts a NOTE (free text, single- or multi-line) on a drawing sheet \u2014 the printable-layout primitive: the lower-left Part Name / Unit / Material block, the lower-right 'Measurement : Millimeter', page numbers. Text may contain placeholders resolved from the drawing and its referenced model: {part_name} {material} {model} {drawing} {page} {pages} {sheet} {scale} {date} {units}; unknown placeholders are left untouched.",
+  "description": "Inserts a NOTE (free text, single- or multi-line) on a drawing sheet — the printable-layout primitive: the lower-left Part Name / Unit / Material block, the lower-right 'Measurement : Millimeter', page numbers. Text may contain placeholders resolved from the drawing and its referenced model: {part_name} {material} {model} {drawing} {page} {pages} {sheet} {scale} {date} {units}; unknown placeholders are left untouched.",
   "input": {
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
    "params": {
-    "text": "string (required \u2014 note text; '\n' starts a new line; placeholders resolved)",
-    "x": "number (required \u2014 note X on the sheet in meters, from the sheet's lower-left origin)",
-    "y": "number (required \u2014 note Y on the sheet in meters)",
-    "height": "number (optional, default 0.0035 \u2014 text height in meters (0.0035 = 3.5 mm))",
-    "justification": "string (optional, default 'left' \u2014 'left'|'center'|'right')",
+    "text": "string (required — note text; '\n' starts a new line; placeholders resolved)",
+    "x": "number (required — note X on the sheet in meters, from the sheet's lower-left origin)",
+    "y": "number (required — note Y on the sheet in meters)",
+    "height": "number (optional, default 0.0035 — text height in meters (0.0035 = 3.5 mm))",
+    "justification": "string (optional, default 'left' — 'left'|'center'|'right')",
     "bold": "boolean (optional, default false)",
     "italic": "boolean (optional, default false)",
-    "leader": "boolean (optional, default false \u2014 attach a leader from the note to an entity)",
-    "leader_x": "number (optional \u2014 sheet-meters point ON the entity to attach the leader to; required when leader=true)",
-    "leader_y": "number (optional \u2014 see leader_x)",
-    "leader_type": "string (optional, default 'edge' \u2014 'edge'|'vertex'|'face'|'silhouette'|'sketch_segment'|'component')",
-    "leader_side": "string (optional, default 'right' \u2014 'left'|'right'|'smart')",
-    "sheet": "string (optional \u2014 target sheet name; default = the active sheet)"
+    "leader": "boolean (optional, default false — attach a leader from the note to an entity)",
+    "leader_x": "number (optional — sheet-meters point ON the entity to attach the leader to; required when leader=true)",
+    "leader_y": "number (optional — see leader_x)",
+    "leader_type": "string (optional, default 'edge' — 'edge'|'vertex'|'face'|'silhouette'|'sketch_segment'|'component')",
+    "leader_side": "string (optional, default 'right' — 'left'|'right'|'smart')",
+    "sheet": "string (optional — target sheet name; default = the active sheet)"
    }
   },
-  "output": "\u2192 see execution-response.json \u2014 result_geometry = {text, resolved_text, note, added, sheet, x, y, height, leader}"
+  "output": "→ see execution-response.json — result_geometry = {text, resolved_text, note, added, sheet, x, y, height, leader}"
  },
  "add_balloon": {
-  "description": "Inserts ONE BOM balloon (item number, or custom text) attached to the component under a point in a drawing view \u2014 the assembly-callout primitive. For a plain text label with a leader use add_drawing_note(leader=true); for a numbered legend over every component use auto_balloon.",
+  "description": "Inserts ONE BOM balloon (item number, or custom text) attached to the component under a point in a drawing view — the assembly-callout primitive. For a plain text label with a leader use add_drawing_note(leader=true); for a numbered legend over every component use auto_balloon.",
   "input": {
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
    "params": {
-    "x": "number (required \u2014 sheet-meters point ON the component in a view; the leader attaches there)",
-    "y": "number (required \u2014 see x)",
-    "text": "string (optional \u2014 custom balloon text; empty = the component's item number)",
-    "style": "string (optional, default 'circle' \u2014 'circle'|'box'|'square'|'hexagon'|'diamond'|'triangle'|'underline')",
-    "size": "string (optional, default 'auto' \u2014 'auto'|'1'|'2'|'3'|'4'|'5')",
-    "text_x": "number (optional \u2014 balloon text X in sheet meters; default offset from the pick)",
-    "text_y": "number (optional \u2014 see text_x)"
+    "x": "number (required — sheet-meters point ON the component in a view; the leader attaches there)",
+    "y": "number (required — see x)",
+    "text": "string (optional — custom balloon text; empty = the component's item number)",
+    "style": "string (optional, default 'circle' — 'circle'|'box'|'square'|'hexagon'|'diamond'|'triangle'|'underline')",
+    "size": "string (optional, default 'auto' — 'auto'|'1'|'2'|'3'|'4'|'5')",
+    "text_x": "number (optional — balloon text X in sheet meters; default offset from the pick)",
+    "text_y": "number (optional — see text_x)"
    }
   },
-  "output": "\u2192 see execution-response.json \u2014 result_geometry = {note, text, style, x, y, balloon_x, balloon_y}"
+  "output": "→ see execution-response.json — result_geometry = {note, text, style, x, y, balloon_x, balloon_y}"
  },
  "auto_balloon": {
   "description": "Auto-balloons EVERY component in a drawing view in one call (a numbered BOM legend) with the balloons laid out around the view. Use add_balloon for a single custom callout.",
@@ -268,14 +277,14 @@
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
    "params": {
-    "view": "string (required \u2014 drawing view name, from add_drawing_view's features[0] or analyze_slddrw_test)",
-    "layout": "string (optional, default 'circle' \u2014 'square'|'circle'; where balloons are placed around the view)",
-    "style": "string (optional, default 'circle' \u2014 'circle'|'box'|'square'|'hexagon'|'diamond'|'triangle'|'underline')",
-    "ignore_multiple": "boolean (optional, default true \u2014 one balloon per component, not per instance)",
+    "view": "string (required — drawing view name, from add_drawing_view's features[0] or analyze_slddrw_test)",
+    "layout": "string (optional, default 'circle' — 'square'|'circle'; where balloons are placed around the view)",
+    "style": "string (optional, default 'circle' — 'circle'|'box'|'square'|'hexagon'|'diamond'|'triangle'|'underline')",
+    "ignore_multiple": "boolean (optional, default true — one balloon per component, not per instance)",
     "item_number_start": "integer (optional, default 1)"
    }
   },
-  "output": "\u2192 see execution-response.json \u2014 result_geometry = {view, count, note_count, layout, style, notes}"
+  "output": "→ see execution-response.json — result_geometry = {view, count, note_count, layout, style, notes}"
  },
  "add_drawing_view": {
   "description": "Adds a model projection view to the active drawing sheet. The referenced part must be saved to disk. view_type maps to SolidWorks standard views.",
@@ -284,31 +293,31 @@
    "state_version": "integer (required, must match current execution state)",
    "params": {
     "view_type": "string (required: 'front', 'top', 'right', 'isometric', 'back', 'bottom', 'left')",
-    "pos_x": "number (optional, default 0.1 \u2014 X position on drawing sheet in meters)",
-    "pos_y": "number (optional, default 0.1 \u2014 Y position on drawing sheet in meters)",
-    "scale": "number (optional, default 1.0 \u2014 view scale)",
-    "model_path": "string (optional \u2014 full path to part file; auto-detects first open part if omitted)",
-    "display_mode": "string (optional \u2014 'hlv'|'hlr'|'wireframe'|'shaded'|'shaded_edges'|'default'; '' = drafting default: ortho views\u2192HLV, isometric\u2192document default. IView.SetDisplayMode3, swDisplayMode_e)"
+    "pos_x": "number (optional, default 0.1 — X position on drawing sheet in meters)",
+    "pos_y": "number (optional, default 0.1 — Y position on drawing sheet in meters)",
+    "scale": "number (optional, default 1.0 — view scale)",
+    "model_path": "string (optional — full path to part file; auto-detects first open part if omitted)",
+    "display_mode": "string (optional — 'hlv'|'hlr'|'wireframe'|'shaded'|'shaded_edges'|'default'; '' = drafting default: ortho views→HLV, isometric→document default. IView.SetDisplayMode3, swDisplayMode_e)"
    }
   },
-  "output": "\u2192 see execution-response.json"
+  "output": "→ see execution-response.json"
  },
  "add_flat_pattern_view": {
-  "description": "Adds a FLAT PATTERN drawing view of a sheet-metal part (the unfolded blank with bend lines/notes) \u2014 the correct, standard way to detail sheet metal (sheet metal is dimensioned on its flat pattern, not the folded views). Uses IDrawingDoc.CreateFlatPatternViewFromModelView3(ModelName, ConfigName, LocX, LocY, LocZ, HideBendLines, FlipView). The part must be sheet metal (have a Flat-Pattern feature) and saved to disk. config_name defaults to the part's active configuration (falls back to 'Default'). Then auto_dimension_drawing places the blank/hole dimensions on it. Bumps state_version; result_geometry echoes {view_name, config, hide_bend_lines}.",
+  "description": "Adds a FLAT PATTERN drawing view of a sheet-metal part (the unfolded blank with bend lines/notes) — the correct, standard way to detail sheet metal (sheet metal is dimensioned on its flat pattern, not the folded views). Uses IDrawingDoc.CreateFlatPatternViewFromModelView3(ModelName, ConfigName, LocX, LocY, LocZ, HideBendLines, FlipView). The part must be sheet metal (have a Flat-Pattern feature) and saved to disk. config_name defaults to the part's active configuration (falls back to 'Default'). Then auto_dimension_drawing places the blank/hole dimensions on it. Bumps state_version; result_geometry echoes {view_name, config, hide_bend_lines}.",
   "input": {
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
    "params": {
-    "pos_x": "number (optional, default 0.1 \u2014 X position on drawing sheet in meters)",
-    "pos_y": "number (optional, default 0.1 \u2014 Y position on drawing sheet in meters)",
-    "scale": "number (optional, default 1.0 \u2014 view scale)",
-    "model_path": "string (optional \u2014 full path to the sheet-metal part; auto-detects first open part if omitted)",
-    "config_name": "string (optional \u2014 configuration to flatten; defaults to the part's active configuration, else 'Default')",
-    "hide_bend_lines": "boolean (optional, default false \u2014 hide the bend lines in the flat pattern)",
-    "flip_view": "boolean (optional, default false \u2014 flip the flat pattern view)"
+    "pos_x": "number (optional, default 0.1 — X position on drawing sheet in meters)",
+    "pos_y": "number (optional, default 0.1 — Y position on drawing sheet in meters)",
+    "scale": "number (optional, default 1.0 — view scale)",
+    "model_path": "string (optional — full path to the sheet-metal part; auto-detects first open part if omitted)",
+    "config_name": "string (optional — configuration to flatten; defaults to the part's active configuration, else 'Default')",
+    "hide_bend_lines": "boolean (optional, default false — hide the bend lines in the flat pattern)",
+    "flip_view": "boolean (optional, default false — flip the flat pattern view)"
    }
   },
-  "output": "\u2192 see execution-response.json"
+  "output": "→ see execution-response.json"
  },
  "add_drawing_dimension": {
   "description": "Applies a smart dimension to a drawing view segment nearest to point (px, py). Same coordinate selection approach as add_dimension but operates in a drawing document. Requires active drawing document.",
@@ -323,40 +332,56 @@
     "label_offset_y": "number (optional, default -0.015)"
    }
   },
-  "output": "\u2192 see execution-response.json"
+  "output": "→ see execution-response.json"
+ },
+ "delete_drawing_dimension": {
+  "description": "Deletes ONE display dimension from the active drawing, addressed either by name ('RD2' or the full name 'RD2@Drawing View2') or by the sheet point where its TEXT sits (px, py in sheet metres; nearest text within tolerance_mm wins). Called with no target (empty name, no px/py) it CHANGES NOTHING and LISTS every dimension on the sheet instead. Call the listing form first when removing a dimension a person drew by hand: auto_dimension_drawing's essentials mode cannot see dimensions it did not create. Bumps state_version only when something was actually deleted; the reply is re-read after deletion so it proves what remains.",
+  "input": {
+   "operation_id": "string (required, unique idempotency key)",
+   "state_version": "integer (required, must match current execution state)",
+   "params": {
+    "name": "string (optional, default '' — display name ('RD2') or full name ('RD2@Drawing View2'); empty = no name target)",
+    "px": "number (optional — X of the dimension TEXT on the sheet, in metres; omit when addressing by name)",
+    "py": "number (optional — Y of the dimension TEXT on the sheet, in metres; omit when addressing by name)",
+    "tolerance_mm": "number (optional, default 3.0 — how close px/py must be to a dimension text, in mm)",
+    "all_matching": "boolean (optional, default false — delete EVERY dimension matching name; false = first match only)"
+   }
+  },
+  "output": "→ see execution-response.json — result_geometry holds {action ('deleted'|'listed'|'not_found'), deleted_count, deleted[], remaining_count, dimensions[], notes[]}; each dimensions[] entry is {name, full_name, view, value_mm, diametric?, text_mm}."
  },
  "auto_dimension_drawing": {
-  "description": "Automatically transfers the MODEL's driving dimensions into the active drawing's views (SolidWorks 'Insert Model Items > Dimensions'). The robust alternative to add_drawing_dimension's fragile coordinate pick: dimensions come straight from the model's parametric dimensions, correctly placed. Uses IDrawingDoc.InsertModelAnnotations3 (Types = swInsertDimensionsMarkedForDrawing, optionally + NotMarkedForDrawing). Bumps state_version; result_geometry echoes inserted_count. Requires an active drawing with at least one model view. mode='essentials' (DEFAULT) is the printable-set convention taken from the client's 19 reference sheets: a CURATED set built from each orthographic view's projected geometry at tool-computed positions \u2014 overall width (below) + overall height (left), one hole callout per DISTINCT diameter, and a hole-position chain from the left-most edge through every distinct hole-centre X. It inserts NOTHING from the model, so it cannot reproduce the 21-60 colliding dimensions of mode='model'; the shaded isometric is skipped.",
+  "description": "Automatically transfers the MODEL's driving dimensions into the active drawing's views (SolidWorks 'Insert Model Items > Dimensions'). The robust alternative to add_drawing_dimension's fragile coordinate pick: dimensions come straight from the model's parametric dimensions, correctly placed. Uses IDrawingDoc.InsertModelAnnotations3 (Types = swInsertDimensionsMarkedForDrawing, optionally + NotMarkedForDrawing). Bumps state_version; result_geometry echoes inserted_count. Requires an active drawing with at least one model view. mode='essentials' (DEFAULT) is the printable-set convention taken from the client's 19 reference sheets: a CURATED set built from each orthographic view's projected geometry at tool-computed positions — overall width (below) + overall height (left), one hole callout per DISTINCT diameter, and a hole-position chain from the left-most edge through every distinct hole-centre X. It inserts NOTHING from the model, so it cannot reproduce the 21-60 colliding dimensions of mode='model'; the shaded isometric is skipped.",
   "input": {
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
    "params": {
     "mode": "string (optional, default 'essentials' - 'essentials'|'model'). 'essentials' = the curated printable-set convention taken from the client's reference sheets: the overall envelope + one hole callout per distinct diameter + the hole positions as a baseline row of distinct X and column of distinct Y. THREE RULES: (1) one measurement is dimensioned ONCE per sheet - the same envelope appears in every view and the first view that claims a value keeps it (the others are reported in result_geometry.skipped); (2) the hole callouts and hole positions go on the ONE view that shows the most holes as circles, so a neighbouring view cannot print a second set of the same values or call out a corner fillet as a hole; (3) every created value is compared with the value the geometry implies and a disagreeing dimension is DELETED instead of printed. 'model' = every model dimension marked for the drawing, placed where SolidWorks wants (crowded).",
-    "all_views": "boolean (optional, default true \u2014 insert into all views; false = only the currently selected view)",
-    "include_unmarked": "boolean (optional, default false \u2014 also insert driving dims NOT marked for drawing, i.e. ALL driving dims; more complete but noisier. Use if marked-only inserts 0 dims)",
-    "eliminate_duplicates": "boolean (optional, default true \u2014 'model' mode only: avoid inserting the same model dimension into more than one view)",
-    "gap": "number (optional, default 0.012 \u2014 'essentials' only: distance in METRES from the drawing to the first dimension row, and between rows)",
-    "include_callouts": "boolean (optional, default true \u2014 'essentials' only: one hole callout per distinct diameter)",
-    "include_hole_positions": "boolean (optional, default true \u2014 'essentials' only: the hole-position chain from the left-most edge)",
+    "all_views": "boolean (optional, default true — insert into all views; false = only the currently selected view)",
+    "include_unmarked": "boolean (optional, default false — also insert driving dims NOT marked for drawing, i.e. ALL driving dims; more complete but noisier. Use if marked-only inserts 0 dims)",
+    "eliminate_duplicates": "boolean (optional, default true — 'model' mode only: avoid inserting the same model dimension into more than one view)",
+    "gap": "number (optional, default 0.012 — 'essentials' only: distance in METRES from the drawing to the first dimension row, and between rows)",
+    "include_callouts": "boolean (optional, default true — 'essentials' only: one hole callout per distinct diameter)",
+    "include_hole_positions": "boolean (optional, default true — 'essentials' only: the hole-position chain from the left-most edge)",
+    "include_circle_diameters": "boolean (optional, default true — 'essentials' only: add a verified Ø dimension to every circle the callout pass did not already cover, including the Ø a neighbouring view shows but the hole-owning view does not; corner arcs/fillets are skipped)",
     "clear_existing": "boolean (optional, default false - 'essentials' only). Delete the sheet's existing display dimensions (curated dimensions AND hole callouts) before creating the new set. This is what makes RE-RUNNING a sheet safe: without it every pass piles a second copy on top and the only way to iterate was a brand-new drawing document per attempt. Use it whenever you re-dimension a sheet that 'essentials' already produced."
    }
   },
-  "output": "\u2192 see execution-response.json \u2014 result_geometry holds {inserted_count, all_views, include_unmarked}. 'model' mode: result_geometry holds {inserted_count, all_views, include_unmarked}. 'essentials' mode: result_geometry holds {mode, inserted_count, gap_mm, include_callouts, include_hole_positions, created[], skipped[]}, each 'created' entry being {kind, ok, value_mm, expected_mm, match} \u2014 verify match=true before printing."
+  "output": "→ see execution-response.json — result_geometry holds {inserted_count, all_views, include_unmarked}. 'model' mode: result_geometry holds {inserted_count, all_views, include_unmarked}. 'essentials' mode: result_geometry holds {mode, inserted_count, gap_mm, include_callouts, include_hole_positions, created[], skipped[]}, each 'created' entry being {kind, ok, value_mm, expected_mm, match} — verify match=true before printing."
  },
  "auto_center_marks": {
-  "description": "Automatically places center marks (with extended centerlines) on every hole/slot in every model view of the active drawing (SolidWorks 'Auto Insert > Center Marks', IView.AutoInsertCenterMarks2). Robust and automatic \u2014 no coordinate picking (the drawing-side analogue of index-based selection). The difficulty-2 capability a bracket/flange with holes needs on top of auto_dimension_drawing. Bumps state_version; result_geometry echoes the total center-mark count. Requires an active drawing with model views.",
+  "description": "Automatically places center marks (with extended centerlines) on every hole/slot in every model view of the active drawing (SolidWorks 'Auto Insert > Center Marks', IView.AutoInsertCenterMarks2). Robust and automatic — no coordinate picking (the drawing-side analogue of index-based selection). The difficulty-2 capability a bracket/flange with holes needs on top of auto_dimension_drawing. Bumps state_version; result_geometry echoes the total center-mark count. Requires an active drawing with model views.",
   "input": {
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
    "params": {
-    "include_slots": "boolean (optional, default true \u2014 also add slot center marks/centerlines for linear & arc slots, not just round holes)",
-    "extended_lines": "boolean (optional, default true \u2014 draw the extended centerlines through each hole, not just a small cross)"
+    "include_slots": "boolean (optional, default true — also add slot center marks/centerlines for linear & arc slots, not just round holes)",
+    "extended_lines": "boolean (optional, default true — draw the extended centerlines through each hole, not just a small cross)"
    }
   },
-  "output": "\u2192 see execution-response.json \u2014 result_geometry holds {center_marks, views_processed, include_slots}. center_marks = total center marks across all model views (0 if the part has no holes/slots)."
+  "output": "→ see execution-response.json — result_geometry holds {center_marks, views_processed, include_slots}. center_marks = total center marks across all model views (0 if the part has no holes/slots)."
  },
  "add_hole_callout": {
-  "description": "Inserts a hole callout (e.g. 'n\u00d7 \u00d8D THRU') on the hole edge nearest the sheet point (px, py) in the active drawing, via IDrawingDoc.AddHoleCallout2. Coordinate-based \u2014 same fragile point pick as add_drawing_dimension (KNOWN-LIMITATIONS #6); prefer auto_center_marks for centerlines and use this for explicit per-hole callouts. Bumps state_version. Requires an active drawing.",
+  "description": "Inserts a hole callout (e.g. 'n× ØD THRU') on the hole edge nearest the sheet point (px, py) in the active drawing, via IDrawingDoc.AddHoleCallout2. Coordinate-based — same fragile point pick as add_drawing_dimension (KNOWN-LIMITATIONS #6); prefer auto_center_marks for centerlines and use this for explicit per-hole callouts. Bumps state_version. Requires an active drawing.",
   "input": {
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
@@ -365,10 +390,10 @@
     "py": "number (Y coordinate of a point on the target hole's projected circular edge, in sheet meters)"
    }
   },
-  "output": "\u2192 see execution-response.json"
+  "output": "→ see execution-response.json"
  },
  "add_section_view": {
-  "description": "Creates a SECTION VIEW to expose internal/blind features (e.g. a blind pocket's depth) as visible, dimensionable edges \u2014 the difficulty-3 capability. Two ways to define the cut: EDGE mode (edge_x,edge_y \u2192 cut ALONG an existing projected edge, best when a real edge lies on the desired plane) or LINE mode (x1,y1,x2,y2 \u2192 draw a cut line, best for cutting THROUGH a feature's interior such as a pocket middle where no edge exists). IDrawingDoc.CreateSectionViewAt5 (with a CreateSectionViewAt2 fallback) places the section at (px,py). Bumps state_version. NOTE: coordinate-based (#6); after it lands, re-run auto_dimension_drawing or add_drawing_dimension to dimension the now-visible depth. Repeated failed attempts can wedge section creation \u2014 restart on a clean drawing state.",
+  "description": "Creates a SECTION VIEW to expose internal/blind features (e.g. a blind pocket's depth) as visible, dimensionable edges — the difficulty-3 capability. Two ways to define the cut: EDGE mode (edge_x,edge_y → cut ALONG an existing projected edge, best when a real edge lies on the desired plane) or LINE mode (x1,y1,x2,y2 → draw a cut line, best for cutting THROUGH a feature's interior such as a pocket middle where no edge exists). IDrawingDoc.CreateSectionViewAt5 (with a CreateSectionViewAt2 fallback) places the section at (px,py). Bumps state_version. NOTE: coordinate-based (#6); after it lands, re-run auto_dimension_drawing or add_drawing_dimension to dimension the now-visible depth. Repeated failed attempts can wedge section creation — restart on a clean drawing state.",
   "input": {
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
@@ -379,14 +404,14 @@
     "y1": "number (LINE mode: cut line start Y, sheet meters)",
     "x2": "number (LINE mode: cut line end X, sheet meters)",
     "y2": "number (LINE mode: cut line end Y, sheet meters)",
-    "px": "number (section-view placement X, sheet meters \u2014 which side the section projects to)",
+    "px": "number (section-view placement X, sheet meters — which side the section projects to)",
     "py": "number (section-view placement Y, sheet meters)",
-    "label": "string (optional, default 'A' \u2014 section label, e.g. 'A' \u2192 'SECTION A-A')",
-    "flip": "boolean (optional, default false \u2014 reverse the cut/viewing direction)",
-    "scale": "number (optional \u2014 section view scale; inherits the parent's if omitted)"
+    "label": "string (optional, default 'A' — section label, e.g. 'A' → 'SECTION A-A')",
+    "flip": "boolean (optional, default false — reverse the cut/viewing direction)",
+    "scale": "number (optional — section view scale; inherits the parent's if omitted)"
    }
   },
-  "output": "\u2192 see execution-response.json \u2014 result_geometry holds {section_view, label}."
+  "output": "→ see execution-response.json — result_geometry holds {section_view, label}."
  },
  "verify_state": {
   "description": "Reads and returns the current CAD state without modifying the document, used to confirm expected state before or after operations.",
@@ -395,14 +420,23 @@
    "state_version": "integer (required, must match current execution state)",
    "params": {}
   },
-  "output": "\u2192 see execution-response.json"
+  "output": "→ see execution-response.json"
  },
  "ensure_ready": {
-  "description": "Lifecycle/bootstrap \u2014 NOT a state-versioned CAD op. Served on its own POST /ensure_ready route (not /api/tool/execute), so it carries no operation_id/state_version. Ensures the execution server is running and SolidWorks is attached, launching SolidWorks via COM ONLY when no SLDWORKS process exists at all. Does NOT open or create any document. Does NOT increment state_version. SINGLE-INSTANCE DISCIPLINE (2026-07-30, KNOWN-LIMITATIONS #14): a failed COM attach does not mean SolidWorks is absent \u2014 a running instance can be missing from the Running Object Table (still starting up, or at a different integrity level because one side is elevated). When a process exists but the attach fails, this retries the attach for 30s and then FAILS with a diagnostic naming the PIDs and the likely cause, rather than launching a duplicate.",
+  "description": "Lifecycle/bootstrap — NOT a state-versioned CAD op. Served on its own POST /ensure_ready route (not /api/tool/execute), so it carries no operation_id/state_version. Ensures the execution server is running and SolidWorks is attached, launching SolidWorks via COM ONLY when no SLDWORKS process exists at all. Does NOT open or create any document. Does NOT increment state_version. SINGLE-INSTANCE DISCIPLINE (2026-07-30, KNOWN-LIMITATIONS #14): a failed COM attach does not mean SolidWorks is absent — a running instance can be missing from the Running Object Table (still starting up, or at a different integrity level because one side is elevated). When a process exists but the attach fails, this retries the attach for 30s and then FAILS with a diagnostic naming the PIDs and the likely cause, rather than launching a duplicate.",
   "input": {
    "params": {}
   },
   "output": "{ status, comAttached, swLaunched, activeDocument, swVersion, stateVersion } (or comAttached=false + launchError/ensureError on failure; ensureError also carries solidworksProcessCount when the attach failed while a process was running)"
+ },
+ "restart_execution_server": {
+  "description": "Lifecycle operation — NOT a state-versioned CAD op. Restarts the SolidWorksExecution process that every other tool talks to; with rebuild=true it rebuilds from source first. A failed build is reported (build_exit, build_tail) and the previous executable still starts, so the session keeps a server. Stops only SolidWorksExecution.exe, never SLDWORKS.exe; an open document survives and the new server re-attaches through COM.",
+  "input": {
+   "params": {
+    "rebuild": "boolean (optional, default false — rebuild from source before starting the new exe)"
+   }
+  },
+  "output": "{stop output, build_exit, build_tail, health, ensure, ensure_error?} — health is the /health payload after the new server is up; ensure is the ensure_ready payload."
  },
  "export_document": {
   "description": "Exports the active SolidWorks document to a file without closing it. DWG/DXF require an active drawing document. PDF uses SolidWorks PDF export options. SolidWorks infers the format from the file extension, so PNG (the way to LOOK at a drawing - a PDF cannot be screenshotted here and its text is outlines) exports the active SHEET as an image. state_version is NOT incremented (no CAD state change).",
@@ -410,11 +444,11 @@
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
    "params": {
-    "format": "string (required: 'STEP', 'IGES', 'STL', 'PDF', 'DWG', 'DXF', 'PNG' \u2014 DWG/DXF require active drawing doc; PNG exports the active sheet as an image)",
-    "file_path": "string (required \u2014 full output path including filename and extension)"
+    "format": "string (required: 'STEP', 'IGES', 'STL', 'PDF', 'DWG', 'DXF', 'PNG' — DWG/DXF require active drawing doc; PNG exports the active sheet as an image)",
+    "file_path": "string (required — full output path including filename and extension)"
    }
   },
-  "output": "\u2192 see execution-response.json"
+  "output": "→ see execution-response.json"
  },
  "drawing_preview": {
   "description": "[ADAPTER-ONLY - no COM of its own, no ToolController/SolidWorksService case] Returns the ACTIVE SHEET as a real IMAGE (MCP image content), not a string. The adapter composes set_drawing_sheet (only when a sheet name is given) + export_document(format=PNG) into a scratch file and hands that file back as an image. This is the drawing loop's EYES: overview, perspective, style, difference - none of that is in a text read-back, and a PDF cannot be screenshotted on this machine (its text is outlines), so without this the model builds sheets blind and only discovers overlaps / off-paper views at the end, when the layout decisions behind them are already wrong. Call it after EVERY drawing step. Only the optional sheet activation changes CAD state.",
@@ -433,11 +467,11 @@
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
    "params": {
-    "file_path_base": "string (required \u2014 output path without extension, e.g. 'C:/output/mypart')",
-    "formats_json": "string (required \u2014 JSON array of format strings, e.g. '[\"STEP\",\"STL\",\"PDF\"]')"
+    "file_path_base": "string (required — output path without extension, e.g. 'C:/output/mypart')",
+    "formats_json": "string (required — JSON array of format strings, e.g. '[\"STEP\",\"STL\",\"PDF\"]')"
    }
   },
-  "output": "\u2192 see execution-response.json"
+  "output": "→ see execution-response.json"
  },
  "close_document": {
   "description": "Closes the active SolidWorks document, optionally saving before closing.",
@@ -449,7 +483,7 @@
     "close_all": "boolean (optional, default false - close ALL open documents incl. invisibly-loaded component docs via CloseAllDocuments(true); a per-active-doc close loop can never reach those, and a lingering same-TITLE doc blocks opening another folder's part (error 65536) and locks files"
    }
   },
-  "output": "\u2192 see execution-response.json"
+  "output": "→ see execution-response.json"
  },
  "save_document": {
   "description": "Saves the active SolidWorks document to disk. With file_path, does a SaveAs to that path (creating the directory); without it, an in-place Save (only if the document already has a path). Does NOT increment state_version (no geometry change). A part must be saved to disk before a drawing view can reference it.",
@@ -457,30 +491,30 @@
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
    "params": {
-    "file_path": "string (optional \u2014 full output path incl. extension: .sldprt/.sldasm/.slddrw; in-place save if omitted)"
+    "file_path": "string (optional — full output path incl. extension: .sldprt/.sldasm/.slddrw; in-place save if omitted)"
    }
   },
-  "output": "\u2192 see execution-response.json"
+  "output": "→ see execution-response.json"
  },
  "analyze_model": {
-  "description": "Analyzes the active part document without modifying it. Does NOT increment state_version. analysis_type='mass_properties': returns volume, surface_area, center of gravity (cx/cy/cz). analysis_type='geometry': returns bodies, faces, edges, vertices counts. analysis_type='edges': returns one JSON object listing every solid edge with start/end/midpoint 3D coords (meters, rounded to 6 decimals; closed/circular edges also include length) \u2014 pick an edge index (the `i` field) for add_edge_feature edge_indices, or a midpoint for coordinate selection. Slowest mode on very large parts (COM-bound). analysis_type='faces': returns one JSON object listing every solid face with a stable index `i` (planar faces also carry normal, area, and a representative on-plane point) \u2014 pick a face index for create_sketch(on_face, face_index). analysis_type='features': the COMPACT part recipe (default 'understand the part' read) \u2014 ordered feature tree (name/type, suppressed only when true), deduped driving dimensions (SI, rounded to 6 decimals), a per-sketch SUMMARY (segment counts + an inline {cx,cy,r} for single-full-circle profiles; NO per-segment coordinate dump), each sketch's plane {ref:'Front/Top/Right Plane', offset}, each extrude/cut's {end, depth (blind only), reversed}, pattern semantics, and equations + globals; features are in tree (history) order. analysis_type='sketch' (requires 'name'): ONE sketch's full geometry (every segment, rounded to 6 decimals) + plane \u2014 use only when exact sketch coordinates are needed. analysis_type='feature_map': per-feature geometry ATTRIBUTION \u2014 walks the tree base\u2192end with the ROLLBACK BAR (swMoveRollbackBarTo_e) and diffs the topology between stops inside the tool; consumed_edges (both endpoints gone \u2014 trimmed neighbours excluded) are the deterministic fillet/chamfer edge anchors (PRE-feature geometry), created_faces are genuinely new surfaces (trimmed existing planes excluded). Non-destructive: the bar is restored to the end in finally; nothing is saved.",
+  "description": "Analyzes the active part document without modifying it. Does NOT increment state_version. analysis_type='mass_properties': returns volume, surface_area, center of gravity (cx/cy/cz). analysis_type='geometry': returns bodies, faces, edges, vertices counts. analysis_type='edges': returns one JSON object listing every solid edge with start/end/midpoint 3D coords (meters, rounded to 6 decimals; closed/circular edges also include length) — pick an edge index (the `i` field) for add_edge_feature edge_indices, or a midpoint for coordinate selection. Slowest mode on very large parts (COM-bound). analysis_type='faces': returns one JSON object listing every solid face with a stable index `i` (planar faces also carry normal, area, and a representative on-plane point) — pick a face index for create_sketch(on_face, face_index). analysis_type='features': the COMPACT part recipe (default 'understand the part' read) — ordered feature tree (name/type, suppressed only when true), deduped driving dimensions (SI, rounded to 6 decimals), a per-sketch SUMMARY (segment counts + an inline {cx,cy,r} for single-full-circle profiles; NO per-segment coordinate dump), each sketch's plane {ref:'Front/Top/Right Plane', offset}, each extrude/cut's {end, depth (blind only), reversed}, pattern semantics, and equations + globals; features are in tree (history) order. analysis_type='sketch' (requires 'name'): ONE sketch's full geometry (every segment, rounded to 6 decimals) + plane — use only when exact sketch coordinates are needed. analysis_type='feature_map': per-feature geometry ATTRIBUTION — walks the tree base→end with the ROLLBACK BAR (swMoveRollbackBarTo_e) and diffs the topology between stops inside the tool; consumed_edges (both endpoints gone — trimmed neighbours excluded) are the deterministic fillet/chamfer edge anchors (PRE-feature geometry), created_faces are genuinely new surfaces (trimmed existing planes excluded). Non-destructive: the bar is restored to the end in finally; nothing is saved.",
   "input": {
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
    "params": {
     "analysis_type": "string (required: 'mass_properties', 'geometry', 'bodies', 'edges', 'faces', 'features', 'sketch', or 'feature_map')",
-    "name": "string (required only for analysis_type='sketch' \u2014 the sketch feature name, e.g. 'Sketch2')",
-    "from_feature": "string (optional, feature_map only \u2014 start the walk at this tree feature name; default = tree base)",
-    "to_feature": "string (optional, feature_map only \u2014 end the walk at this tree feature name; default = tree end)",
-    "near": "string (optional, edges/faces only \u2014 JSON '[x,y,z]' in meters; return only entities nearest this point instead of the full dump, each annotated with dist and its stable index i; blank = full dump, backward compatible)",
-    "k": "integer (optional, edges/faces only \u2014 keep only the k nearest to 'near'; 0 = no cap)",
-    "axis": "string (optional, edges/faces only \u2014 JSON '[x,y,z]'; keep only entities whose direction is ~parallel to axis: faces filter by planar NORMAL, edges by chord direction)"
+    "name": "string (required only for analysis_type='sketch' — the sketch feature name, e.g. 'Sketch2')",
+    "from_feature": "string (optional, feature_map only — start the walk at this tree feature name; default = tree base)",
+    "to_feature": "string (optional, feature_map only — end the walk at this tree feature name; default = tree end)",
+    "near": "string (optional, edges/faces only — JSON '[x,y,z]' in meters; return only entities nearest this point instead of the full dump, each annotated with dist and its stable index i; blank = full dump, backward compatible)",
+    "k": "integer (optional, edges/faces only — keep only the k nearest to 'near'; 0 = no cap)",
+    "axis": "string (optional, edges/faces only — JSON '[x,y,z]'; keep only entities whose direction is ~parallel to axis: faces filter by planar NORMAL, edges by chord direction)"
    }
   },
-  "output": "\u2192 see execution-response.json \u2014 results encoded in CadState.Features list. mass_properties/geometry: flat 'key=value' strings. edges: a single JSON string {edge_count, edges:[{i,start,end,mid}]} (closed/circular edges also carry length). faces: a single JSON string {face_count, faces:[{i, planar, area, normal?, point?}]} (normal/point only for planar faces). features: a single consolidated JSON string {feature_count, features[], equations[]} \u2014 sketches carry a summary (counts [+circle]); NO raw segments. sketch: a single JSON string {name, sketch:{counts, segments[]}, plane} for the one named sketch. feature_map: a single JSON string {feature_count, map:[{feature, type, suppressed?, delta:{faces,edges,vertices}, consumed_edges:[{mid,len}], created_faces:[{point, normal?, planar, area}]}]} \u2014 coords in meters rounded to 6 decimals; delta/consumed/created present only for unsuppressed solid-affecting features (sketches/ref geometry are listed name+type only)."
+  "output": "→ see execution-response.json — results encoded in CadState.Features list. mass_properties/geometry: flat 'key=value' strings. edges: a single JSON string {edge_count, edges:[{i,start,end,mid}]} (closed/circular edges also carry length). faces: a single JSON string {face_count, faces:[{i, planar, area, normal?, point?}]} (normal/point only for planar faces). features: a single consolidated JSON string {feature_count, features[], equations[]} — sketches carry a summary (counts [+circle]); NO raw segments. sketch: a single JSON string {name, sketch:{counts, segments[]}, plane} for the one named sketch. feature_map: a single JSON string {feature_count, map:[{feature, type, suppressed?, delta:{faces,edges,vertices}, consumed_edges:[{mid,len}], created_faces:[{point, normal?, planar, area}]}]} — coords in meters rounded to 6 decimals; delta/consumed/created present only for unsuppressed solid-affecting features (sketches/ref geometry are listed name+type only)."
  },
  "analyze_drawing": {
-  "description": "[ADAPTER-ONLY \u2014 no C# case] Reads a 2D technical drawing (.DXF or .DWG; a DWG is converted automatically) and returns ONE OF TWO SHAPES, chosen by the READER, never the caller: DIRECT_BUILDABLE (a short plain-text summary of a flat pattern already lowered to Feature Graph IR \u2014 blank, thickness + its source, each bend with its edge-class corroboration, skipped bends, expected volume; the contour deliberately NOT echoed back, so it never costs tokens twice), or 'NOT_DIRECT | <gate reason>' followed by the WHOLE `draw`-dialect artifact. SINGLE HOME FOR THE PAYLOAD LEGEND (2026-09-07, payload phase 5): this tool's model-facing docstring in server.py documents what every field MEANS \u2014 the edge classes, the class-grouped index-carrying `lines`, `open_singles`, `seq`, the ellipse provenance, the graded alignment, `tier`, `printed`/`printed_mismatch`/`kind_from`/`measures` \u2014 because that description reaches the model whether or not it ever calls get_recipe, which a recipe section cannot promise (ADR-077). The recipe's `reverse` section carries the DECISIONS only, and neither repeats the other. Guidance attached to a SINGLE flag is emitted as an adapter-side ADVISORIES block, only when that flag actually fires. Every number is TRUE model mm (DIMLFAC already applied, per view).",
+  "description": "[ADAPTER-ONLY — no C# case] Reads a 2D technical drawing (.DXF or .DWG; a DWG is converted automatically) and returns ONE OF TWO SHAPES, chosen by the READER, never the caller: DIRECT_BUILDABLE (a short plain-text summary of a flat pattern already lowered to Feature Graph IR — blank, thickness + its source, each bend with its edge-class corroboration, skipped bends, expected volume; the contour deliberately NOT echoed back, so it never costs tokens twice), or 'NOT_DIRECT | <gate reason>' followed by the WHOLE `draw`-dialect artifact. SINGLE HOME FOR THE PAYLOAD LEGEND (2026-09-07, payload phase 5): this tool's model-facing docstring in server.py documents what every field MEANS — the edge classes, the class-grouped index-carrying `lines`, `open_singles`, `seq`, the ellipse provenance, the graded alignment, `tier`, `printed`/`printed_mismatch`/`kind_from`/`measures` — because that description reaches the model whether or not it ever calls get_recipe, which a recipe section cannot promise (ADR-077). The recipe's `reverse` section carries the DECISIONS only, and neither repeats the other. Guidance attached to a SINGLE flag is emitted as an adapter-side ADVISORIES block, only when that flag actually fires. Every number is TRUE model mm (DIMLFAC already applied, per view).",
   "input": {
    "operation_id": "n/a at this level - the DWG->DXF conversion calls carry their own operation_id (uuid4) on /api/tool/execute; a .DXF input touches no execution tool at all",
    "state_version": "n/a at this level - the underlying open/export/close calls thread the adapter's tracked state_version (one-shot resync-retry on INVALID_STATE_VERSION)",
@@ -493,25 +527,25 @@
   "output": "string: mode='auto' -> either a DIRECT_BUILDABLE plain-text summary or 'NOT_DIRECT | <reason>' + the whole analysis JSON {analysis_version, source, config, sheet (incl. not_read), frame, views[] (each with geometry{lines as {class: [[index,x1,y1,x2,y2],...]}, arcs, circles, ellipses?}, loops[], open_chains[] (multi-segment), open_singles[]?), alignment[], view_graph?, dimensions[], bend_notes[], notes[], frame_notes[], user_description}; mode='ir' -> a Feature Graph IR JSON; mode='build' -> the compile/build result. JSON is serialized without whitespace padding (separators ',' ':')."
  },
  "analyze_slddrw_test": {
-  "description": "TEST/REFERENCE ONLY (renamed from analyze_drawing 2026-07-27; a .SLDDRW is SLDPRT-linked and nobody ships one \u2014 the shipping reverse path is being rebuilt on DXF/DWG). Analyzes the active NATIVE SolidWorks DRAWING document without modifying it (read-only, does NOT increment state_version). Walks the views (IDrawingDoc.GetFirstView/GetNextView; the first view is the SHEET) and reports each view's name, type (swDrawingViewTypes_e int), scale, sheet position, and its display dimensions (full-name + SI value). Feeds the objective Stage-1 check (do a produced drawing's dims match the model?) and the Stage-2 re-modeling input.",
+  "description": "TEST/REFERENCE ONLY (renamed from analyze_drawing 2026-07-27; a .SLDDRW is SLDPRT-linked and nobody ships one — the shipping reverse path is being rebuilt on DXF/DWG). Analyzes the active NATIVE SolidWorks DRAWING document without modifying it (read-only, does NOT increment state_version). Walks the views (IDrawingDoc.GetFirstView/GetNextView; the first view is the SHEET) and reports each view's name, type (swDrawingViewTypes_e int), scale, sheet position, and its display dimensions (full-name + SI value). Feeds the objective Stage-1 check (do a produced drawing's dims match the model?) and the Stage-2 re-modeling input.",
   "input": {
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
    "params": {
-    "include_geometry": "boolean (optional, default false \u2014 also return each view's projected 2D geometry as clean primitives geometry:{lines, curves, frame} via IView.GetPolylines7, for reverse-engineering a part from its drawing independent of dimension clutter; coords in model-scale meters centered on the view, z=0; line segments carry the up/down / which-face profile structure a dim value can't)",
-    "include_relations": "boolean (optional, default false \u2014 Batch-4 deterministic enrichment; forces include_geometry on. ADDITIVE only (raw geometry arrays are never replaced): per-view relation GROUPS, cross-view station join keys, dimension\u2192primitive attachment, and center-mark/centerline annotations. Every relation/group names its deterministic 'source' from the CLOSED enum {center_coincide, radius_equal, dist_eq_radius_sum, dist_eq_radius_diff, line_dist_eq_radius, shared_endpoint, endpoint_on_curve, anchor_at_center, anchor_on_primitive} plus 'residual' = the max measured deviation in meters (6dp, computed on unrounded values) \u2014 a relation that cannot name a source is never emitted. Tolerance 1e-5 m (10\u00b5m) at model scale. No confidence scores, no inference fields; cross-view output is join keys + CANDIDATE sets, never same-entity conclusions. X-crossings of projected edges are DELIBERATELY not reported (a 2D crossing carries no same-depth guarantee); centerlines are read from the view's centerline sketch \u2014 when the view reports centerlines but exposes no readable segments, a loud {centerlines_reported, unreadable:true} entry is emitted instead of a heuristic guess.)"
+    "include_geometry": "boolean (optional, default false — also return each view's projected 2D geometry as clean primitives geometry:{lines, curves, frame} via IView.GetPolylines7, for reverse-engineering a part from its drawing independent of dimension clutter; coords in model-scale meters centered on the view, z=0; line segments carry the up/down / which-face profile structure a dim value can't)",
+    "include_relations": "boolean (optional, default false — Batch-4 deterministic enrichment; forces include_geometry on. ADDITIVE only (raw geometry arrays are never replaced): per-view relation GROUPS, cross-view station join keys, dimension→primitive attachment, and center-mark/centerline annotations. Every relation/group names its deterministic 'source' from the CLOSED enum {center_coincide, radius_equal, dist_eq_radius_sum, dist_eq_radius_diff, line_dist_eq_radius, shared_endpoint, endpoint_on_curve, anchor_at_center, anchor_on_primitive} plus 'residual' = the max measured deviation in meters (6dp, computed on unrounded values) — a relation that cannot name a source is never emitted. Tolerance 1e-5 m (10µm) at model scale. No confidence scores, no inference fields; cross-view output is join keys + CANDIDATE sets, never same-entity conclusions. X-crossings of projected edges are DELIBERATELY not reported (a 2D crossing carries no same-depth guarantee); centerlines are read from the view's centerline sketch — when the view reports centerlines but exposes no readable segments, a loud {centerlines_reported, unreadable:true} entry is emitted instead of a heuristic guess.)"
    }
   },
-  "output": "\u2192 see execution-response.json \u2014 CadState.Features holds a single JSON string {view_count, dimension_count, views:[{name, type, scale, pos:[x,y], dimensions:[{name, value_si}], geometry?:{lines:[{x1,y1,x2,y2}], curves:[{n,x1,y1,xm,ym,x2,y2}], frame}}]}. view[0] is the drawing sheet. value_si in meters/radians, rounded to 6 decimals. geometry present only when include_geometry=true. Every computed geometry/section frame also carries normal_axis (the view's viewing direction snapped to a SIGNED principal axis, e.g. 'Y'/'-Z'; omitted when not axis-aligned) \u2014 drafting semantics: a CIRCLE in a view is the cross-section of a feature whose axis runs along that view's normal, so circles in different-normal_axis views are DIFFERENT features unless a section proves otherwise. An axis-aligned view's geometry also carries extent {axis:[min,max]} \u2014 the SERVER-computed model-space span of ALL that view's primitives along its two resolved axes (frame signs applied; exact circle/arc extremes included). Read extent BEFORE any 'no material beyond X' conclusion \u2014 never re-derive a view's span client-side from raw v-coordinates (the frame's direction components can be negative). include_relations=true ADDS (ids are POSITIONAL and per-read: view alias vid='v<views[] index>'; within a view l<i>=geometry.lines[i], a<i>=geometry.curves[i], c<i>=geometry.circles[i]; a re-read after a drawing edit may renumber): per view \u2014 vid; relations:{concentric:[{members, center:[x,y], radii[], source:'center_coincide', residual}], equal_diameter:[{members, r, centers[[x,y]..], source:'radius_equal', residual}] (full circles, same \u00d8, distinct centers), tangent:[{members:[2], at:[x,y], source:'dist_eq_radius_sum'|'dist_eq_radius_diff'|'line_dist_eq_radius', residual}], touches:[{at:[x,y], members, source:'shared_endpoint'|'endpoint_on_curve', residual}]} (empty buckets dropped); center_marks:[{at:[u,v], on:[circle ids], source:'center_coincide', residual} | {at, unmatched:true}]; centerlines:[{x1,y1,x2,y2, through?:[circle ids], source?, residual?}]; per dimension \u2014 measures:[primitive ids], measure_src:'anchor_at_center'|'anchor_on_primitive', measure_residual, unmatched_anchors? \u2014 or unattached:true when NO primitive resolves (loud, never dropped/guessed). At root \u2014 stations:{tol, axes:[{axis:'X'|'Y'|'Z', values:[{v, members:{vid:[ids]}, residual}]}], skipped_views?:[vids]}: per-axis model-coordinate JOIN KEYS from circle centers/extents, line endpoints/constant coords, arc centers/endpoints \u2014 only values shared by \u22652 views are listed; members are CANDIDATES (resolve identity via dimensions; >1 candidate = visible ambiguity); relations_skipped_views lists views with no usable transform."
+  "output": "→ see execution-response.json — CadState.Features holds a single JSON string {view_count, dimension_count, views:[{name, type, scale, pos:[x,y], dimensions:[{name, value_si}], geometry?:{lines:[{x1,y1,x2,y2}], curves:[{n,x1,y1,xm,ym,x2,y2}], frame}}]}. view[0] is the drawing sheet. value_si in meters/radians, rounded to 6 decimals. geometry present only when include_geometry=true. Every computed geometry/section frame also carries normal_axis (the view's viewing direction snapped to a SIGNED principal axis, e.g. 'Y'/'-Z'; omitted when not axis-aligned) — drafting semantics: a CIRCLE in a view is the cross-section of a feature whose axis runs along that view's normal, so circles in different-normal_axis views are DIFFERENT features unless a section proves otherwise. An axis-aligned view's geometry also carries extent {axis:[min,max]} — the SERVER-computed model-space span of ALL that view's primitives along its two resolved axes (frame signs applied; exact circle/arc extremes included). Read extent BEFORE any 'no material beyond X' conclusion — never re-derive a view's span client-side from raw v-coordinates (the frame's direction components can be negative). include_relations=true ADDS (ids are POSITIONAL and per-read: view alias vid='v<views[] index>'; within a view l<i>=geometry.lines[i], a<i>=geometry.curves[i], c<i>=geometry.circles[i]; a re-read after a drawing edit may renumber): per view — vid; relations:{concentric:[{members, center:[x,y], radii[], source:'center_coincide', residual}], equal_diameter:[{members, r, centers[[x,y]..], source:'radius_equal', residual}] (full circles, same Ø, distinct centers), tangent:[{members:[2], at:[x,y], source:'dist_eq_radius_sum'|'dist_eq_radius_diff'|'line_dist_eq_radius', residual}], touches:[{at:[x,y], members, source:'shared_endpoint'|'endpoint_on_curve', residual}]} (empty buckets dropped); center_marks:[{at:[u,v], on:[circle ids], source:'center_coincide', residual} | {at, unmatched:true}]; centerlines:[{x1,y1,x2,y2, through?:[circle ids], source?, residual?}]; per dimension — measures:[primitive ids], measure_src:'anchor_at_center'|'anchor_on_primitive', measure_residual, unmatched_anchors? — or unattached:true when NO primitive resolves (loud, never dropped/guessed). At root — stations:{tol, axes:[{axis:'X'|'Y'|'Z', values:[{v, members:{vid:[ids]}, residual}]}], skipped_views?:[vids]}: per-axis model-coordinate JOIN KEYS from circle centers/extents, line endpoints/constant coords, arc centers/endpoints — only values shared by ≥2 views are listed; members are CANDIDATES (resolve identity via dimensions; >1 candidate = visible ambiguity); relations_skipped_views lists views with no usable transform."
  },
  "get_selection": {
-  "description": "Reports what the USER currently has selected in the SolidWorks GUI \u2014 the inverse of index-based selection. When the user clicks a face/edge/vertex/plane in the window (e.g. while describing what to do), this returns each selected entity mapped to the SAME stable index analyze_model(faces/edges) uses, so the AI knows exactly which geometry the user means. A selected FACE \u2192 {type:'face', i, planar, normal?, area, point?} \u2192 feed i to create_sketch(on_face=true, face_index=i). A selected EDGE \u2192 {type:'edge', i, start, end, mid} \u2192 feed i to add_edge_feature(edge_indices='[i]'). Also reports vertices (point) and reference planes (name). Read-only: does NOT change state_version and does NOT clear the selection \u2014 but call it BEFORE any tool that clears the selection (create_sketch/add_edge_feature/extrude cut, etc.).",
+  "description": "Reports what the USER currently has selected in the SolidWorks GUI — the inverse of index-based selection. When the user clicks a face/edge/vertex/plane in the window (e.g. while describing what to do), this returns each selected entity mapped to the SAME stable index analyze_model(faces/edges) uses, so the AI knows exactly which geometry the user means. A selected FACE → {type:'face', i, planar, normal?, area, point?} → feed i to create_sketch(on_face=true, face_index=i). A selected EDGE → {type:'edge', i, start, end, mid} → feed i to add_edge_feature(edge_indices='[i]'). Also reports vertices (point) and reference planes (name). Read-only: does NOT change state_version and does NOT clear the selection — but call it BEFORE any tool that clears the selection (create_sketch/add_edge_feature/extrude cut, etc.).",
   "input": {
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
    "params": {}
   },
-  "output": "\u2192 see execution-response.json \u2014 results encoded in CadState.Features as a single JSON string {selected_count, selection:[{type, i?, ...geometry}]}. type \u2208 face|edge|vertex|plane|other. face carries i/planar/area/normal?/point?; edge carries i/start/end/mid(+length if closed); vertex carries point; plane carries name. i = -1 if the selected face/edge could not be matched to a solid-body index."
+  "output": "→ see execution-response.json — results encoded in CadState.Features as a single JSON string {selected_count, selection:[{type, i?, ...geometry}]}. type ∈ face|edge|vertex|plane|other. face carries i/planar/area/normal?/point?; edge carries i/start/end/mid(+length if closed); vertex carries point; plane carries name. i = -1 if the selected face/edge could not be matched to a solid-body index."
  },
  "edit_sketch": {
   "description": "Reopens an existing sketch feature for editing. Counterpart to create_sketch. Returns COMPLETED with ActiveSketch set to the sketch name. Exit by calling extrude_feature or any feature tool (which exits sketch mode automatically).",
@@ -519,10 +553,10 @@
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
    "params": {
-    "sketch_name": "string (required \u2014 exact sketch feature name, e.g. 'Sketch1')"
+    "sketch_name": "string (required — exact sketch feature name, e.g. 'Sketch1')"
    }
   },
-  "output": "\u2192 see execution-response.json"
+  "output": "→ see execution-response.json"
  },
  "add_reference_geometry": {
   "description": "Creates reference geometry in the active part. type='plane': offset plane from ref_plane_name by offset (meters). type='axis': axis at intersection of two planes/edges (entity1_name/type and entity2_name/type). type='point': reference point at a vertex (px, py, pz).",
@@ -531,18 +565,18 @@
    "state_version": "integer (required, must match current execution state)",
    "params": {
     "type": "string (required: 'plane', 'axis', or 'point')",
-    "ref_plane_name": "string (plane only \u2014 base plane name, e.g. 'Front Plane')",
-    "offset": "number (plane only \u2014 offset distance in meters)",
-    "entity1_name": "string (axis only \u2014 first plane or edge name)",
-    "entity1_type": "string (axis only \u2014 'PLANE' or 'EDGE', default 'PLANE')",
-    "entity2_name": "string (axis only \u2014 second plane or edge name)",
-    "entity2_type": "string (axis only \u2014 'PLANE' or 'EDGE', default 'PLANE')",
-    "px": "number (point only \u2014 X coordinate of vertex)",
-    "py": "number (point only \u2014 Y coordinate of vertex)",
-    "pz": "number (point only \u2014 Z coordinate of vertex)"
+    "ref_plane_name": "string (plane only — base plane name, e.g. 'Front Plane')",
+    "offset": "number (plane only — offset distance in meters)",
+    "entity1_name": "string (axis only — first plane or edge name)",
+    "entity1_type": "string (axis only — 'PLANE' or 'EDGE', default 'PLANE')",
+    "entity2_name": "string (axis only — second plane or edge name)",
+    "entity2_type": "string (axis only — 'PLANE' or 'EDGE', default 'PLANE')",
+    "px": "number (point only — X coordinate of vertex)",
+    "py": "number (point only — Y coordinate of vertex)",
+    "pz": "number (point only — Z coordinate of vertex)"
    }
   },
-  "output": "\u2192 see execution-response.json \u2014 created feature name in CadState.Features[0] (e.g. 'Plane1', 'Axis1')"
+  "output": "→ see execution-response.json — created feature name in CadState.Features[0] (e.g. 'Plane1', 'Axis1')"
  },
  "create_pattern": {
   "description": "Creates a linear, circular, or mirror feature pattern. pattern_type='linear': repeats feature along X/Y/Z direction. pattern_type='circular': repeats feature around a named axis. pattern_type='mirror': mirrors one or more FEATURES about a plane (InsertMirrorFeature2; selection marks features=1, plane=2 per the local CHM). Seed feature must be a solid feature (e.g. 'Boss-Extrude1'). Circular pattern requires a reference axis created with add_reference_geometry.",
@@ -552,63 +586,63 @@
    "params": {
     "pattern_type": "string (required: 'linear', 'circular', or 'mirror')",
     "feature_name": "string (linear/circular: required seed feature name, e.g. 'Boss-Extrude1'; mirror: single-feature shorthand for features_json)",
-    "spacing": "number (linear only \u2014 spacing between instances in meters, default 0.01)",
+    "spacing": "number (linear only — spacing between instances in meters, default 0.01)",
     "count": "integer (number of instances including seed, default 2)",
-    "direction": "string (linear only \u2014 'X', 'Y', or 'Z', default 'X')",
-    "flip": "boolean (linear only, default false \u2014 pattern toward the NEGATIVE axis; FeatureLinearPattern3's FlipDir1, exposed v0.7.0)",
-    "count2": "integer (linear only \u2014 accepted but NON-FUNCTIONAL: no second-direction entity is wired to FeatureLinearPattern3 (recorded gap, 2026-07-16); compose a grid as a pattern OF a pattern instead. Default 1)",
-    "spacing2": "number (linear only \u2014 see count2: non-functional until D2 is wired, default 0.01)",
-    "axis_name": "string (circular only \u2014 reference axis name, e.g. 'Axis1')",
-    "angle": "number (circular only \u2014 degrees; with equal_spacing=true this is the TOTAL spread (use 360 for a full ring), with equal_spacing=false it is the angle BETWEEN adjacent instances)",
-    "equal_spacing": "boolean (circular only, default true \u2014 true: angle=total spread, evenly divided; false: angle=per-instance spacing, may wrap/overlap)",
-    "features_json": "string (mirror only \u2014 JSON array of feature tree names to mirror, e.g. '[\"Edge-Flange1\",\"Sketched Bend2\"]'; ADR-022 JSON-string idiom)",
-    "plane": "string (mirror only \u2014 mirror plane name; canonical English default-plane names resolve on any localization; default 'Right Plane')",
-    "geometry_pattern": "boolean (mirror only, default false \u2014 true mirrors geometry without solving each feature)"
+    "direction": "string (linear only — 'X', 'Y', or 'Z', default 'X')",
+    "flip": "boolean (linear only, default false — pattern toward the NEGATIVE axis; FeatureLinearPattern3's FlipDir1, exposed v0.7.0)",
+    "count2": "integer (linear only — accepted but NON-FUNCTIONAL: no second-direction entity is wired to FeatureLinearPattern3 (recorded gap, 2026-07-16); compose a grid as a pattern OF a pattern instead. Default 1)",
+    "spacing2": "number (linear only — see count2: non-functional until D2 is wired, default 0.01)",
+    "axis_name": "string (circular only — reference axis name, e.g. 'Axis1')",
+    "angle": "number (circular only — degrees; with equal_spacing=true this is the TOTAL spread (use 360 for a full ring), with equal_spacing=false it is the angle BETWEEN adjacent instances)",
+    "equal_spacing": "boolean (circular only, default true — true: angle=total spread, evenly divided; false: angle=per-instance spacing, may wrap/overlap)",
+    "features_json": "string (mirror only — JSON array of feature tree names to mirror, e.g. '[\"Edge-Flange1\",\"Sketched Bend2\"]'; ADR-022 JSON-string idiom)",
+    "plane": "string (mirror only — mirror plane name; canonical English default-plane names resolve on any localization; default 'Right Plane')",
+    "geometry_pattern": "boolean (mirror only, default false — true mirrors geometry without solving each feature)"
    }
   },
-  "output": "\u2192 see execution-response.json \u2014 created pattern feature name in CadState.Features[0]"
+  "output": "→ see execution-response.json — created pattern feature name in CadState.Features[0]"
  },
  "set_part_material": {
-  "description": "Assigns a material to the active part document (all configurations). Applied material appears in Mass Properties and the feature tree. Requires a part document \u2014 not a drawing.",
+  "description": "Assigns a material to the active part document (all configurations). Applied material appears in Mass Properties and the feature tree. Requires a part document — not a drawing.",
   "input": {
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
    "params": {
-    "material_name": "string (required \u2014 EXACT library name, e.g. '1060 Alloy' (NOT 'Aluminum 1060 Alloy'), 'AISI 1020', 'ABS', 'Nylon 6/10')",
-    "library": "string (optional, default 'SolidWorks Materials' \u2014 material database name)"
+    "material_name": "string (required — EXACT library name, e.g. '1060 Alloy' (NOT 'Aluminum 1060 Alloy'), 'AISI 1020', 'ABS', 'Nylon 6/10')",
+    "library": "string (optional, default 'SolidWorks Materials' — material database name)"
    }
   },
-  "output": "\u2192 see execution-response.json \u2014 applied material and library in CadState.Features"
+  "output": "→ see execution-response.json — applied material and library in CadState.Features"
  },
  "sheet_metal_feature": {
-  "description": "Creates sheet metal features on the active part. feature_type='base_flange': converts active sketch profile to sheet metal base (exits sketch automatically). feature_type='edge_flange': adds a default-profile flange to an edge \u2014 select it by edge_index (preferred) or a point (ex,ey,ez). feature_type='sketched_bend': bends the sheet about the bend line(s) in the ACTIVE sketch (IFeatureManager.InsertSheetMetal3dBend, CHM-verified; the pre-selected FIXED face stays put \u2014 pick it by fixed_face_index (analyze faces numbering, preferred) or fixed_x/y/z; a sketch with multiple bend lines yields one feature with one bend per line). feature_type='flat_pattern': unfolds all bends (requires existing base_flange).",
+  "description": "Creates sheet metal features on the active part. feature_type='base_flange': converts active sketch profile to sheet metal base (exits sketch automatically). feature_type='edge_flange': adds a default-profile flange to an edge — select it by edge_index (preferred) or a point (ex,ey,ez). feature_type='sketched_bend': bends the sheet about the bend line(s) in the ACTIVE sketch (IFeatureManager.InsertSheetMetal3dBend, CHM-verified; the pre-selected FIXED face stays put — pick it by fixed_face_index (analyze faces numbering, preferred) or fixed_x/y/z; a sketch with multiple bend lines yields one feature with one bend per line). feature_type='flat_pattern': unfolds all bends (requires existing base_flange).",
   "input": {
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
    "params": {
     "feature_type": "string (required: 'base_flange', 'edge_flange', 'edge_flange_sketch', 'edge_flange_finish', 'flat_pattern', or 'sketched_bend')",
-    "thickness": "number (base_flange \u2014 sheet thickness in meters, default 0.001)",
-    "bend_radius": "number (base_flange/sketched_bend \u2014 bend radius in meters, default 0.001; sketched_bend ignores it when use_default_radius=true)",
-    "k_factor": "number (base_flange \u2014 K-factor for bend allowance, default 0.5)",
-    "ex": "number (edge_flange \u2014 X coordinate of point on target edge)",
-    "ey": "number (edge_flange \u2014 Y coordinate of point on target edge)",
-    "ez": "number (edge_flange \u2014 Z coordinate of point on target edge)",
-    "flange_length": "number (edge_flange \u2014 flange length in meters, default 0.02)",
-    "angle": "number (edge_flange/sketched_bend \u2014 bend angle in degrees, default 90.0)",
-    "use_default_radius": "boolean (sketched_bend only, default false \u2014 true uses the sheet's default bend radius)",
-    "flip": "boolean (sketched_bend only, default false \u2014 reverse the bend direction)",
-    "bend_position": "string (sketched_bend only \u2014 'centerline' (default), 'material_inside', 'material_outside', or 'bend_outside'; matches the `position` analyze_model(features) reports on an SM3dBend)",
-    "fixed_face_index": "integer (sketched_bend, optional \u2014 the FIXED face's index from analyze_model(faces); preferred over fixed_x/y/z)",
-    "fixed_x": "number (sketched_bend \u2014 X of a 3D point ON the fixed face, meters)",
-    "fixed_y": "number (sketched_bend \u2014 Y of a 3D point ON the fixed face, meters)",
-    "fixed_z": "number (sketched_bend \u2014 Z of a 3D point ON the fixed face, meters)",
-    "reverse_thickness": "boolean (base_flange only, default false \u2014 thicken to the OPPOSITE side of the sketch plane; derive from which side the original blank's faces sit, e.g. feature_map's SMBaseFlange created faces)",
-    "symmetric_thickness": "boolean (base_flange only, default false \u2014 thicken BOTH ways off the sketch plane (\u00b1t/2, mid-plane style); reproduce the original's own flag \u2014 it also sets the intrinsic sheet orientation downstream bend directions fold against)",
-    "clear_profile": "boolean (edge_flange_sketch only, default true \u2014 wipe the generated default rectangle so the caller redraws the ORIGINAL's custom profile via add_sketch_entity; the op leaves the generated sketch ACTIVE and echoes its MEASURED frame in result_geometry, then edge_flange_finish creates the flange from it \u2014 SW's documented custom-profile flow; the flange API accepts only a sketch IT generated)",
-    "edge_index": "integer (edge_flange/edge_flange_sketch/edge_flange_finish, optional \u2014 the attach edge's stable index from analyze_model(edges); PREFERRED over ex/ey/ez, whose coordinate pick can miss a real edge (KNOWN-LIMITATIONS #6). Since v0.7.0 the simple edge_flange accepts it too (shared SelectFlangeEdge). For the two-call custom-profile flow pass the SAME index to both calls \u2014 the sketch step adds no solid geometry, so edge enumeration is stable)"
+    "thickness": "number (base_flange — sheet thickness in meters, default 0.001)",
+    "bend_radius": "number (base_flange/sketched_bend — bend radius in meters, default 0.001; sketched_bend ignores it when use_default_radius=true)",
+    "k_factor": "number (base_flange — K-factor for bend allowance, default 0.5)",
+    "ex": "number (edge_flange — X coordinate of point on target edge)",
+    "ey": "number (edge_flange — Y coordinate of point on target edge)",
+    "ez": "number (edge_flange — Z coordinate of point on target edge)",
+    "flange_length": "number (edge_flange — flange length in meters, default 0.02)",
+    "angle": "number (edge_flange/sketched_bend — bend angle in degrees, default 90.0)",
+    "use_default_radius": "boolean (sketched_bend only, default false — true uses the sheet's default bend radius)",
+    "flip": "boolean (sketched_bend only, default false — reverse the bend direction)",
+    "bend_position": "string (sketched_bend only — 'centerline' (default), 'material_inside', 'material_outside', or 'bend_outside'; matches the `position` analyze_model(features) reports on an SM3dBend)",
+    "fixed_face_index": "integer (sketched_bend, optional — the FIXED face's index from analyze_model(faces); preferred over fixed_x/y/z)",
+    "fixed_x": "number (sketched_bend — X of a 3D point ON the fixed face, meters)",
+    "fixed_y": "number (sketched_bend — Y of a 3D point ON the fixed face, meters)",
+    "fixed_z": "number (sketched_bend — Z of a 3D point ON the fixed face, meters)",
+    "reverse_thickness": "boolean (base_flange only, default false — thicken to the OPPOSITE side of the sketch plane; derive from which side the original blank's faces sit, e.g. feature_map's SMBaseFlange created faces)",
+    "symmetric_thickness": "boolean (base_flange only, default false — thicken BOTH ways off the sketch plane (±t/2, mid-plane style); reproduce the original's own flag — it also sets the intrinsic sheet orientation downstream bend directions fold against)",
+    "clear_profile": "boolean (edge_flange_sketch only, default true — wipe the generated default rectangle so the caller redraws the ORIGINAL's custom profile via add_sketch_entity; the op leaves the generated sketch ACTIVE and echoes its MEASURED frame in result_geometry, then edge_flange_finish creates the flange from it — SW's documented custom-profile flow; the flange API accepts only a sketch IT generated)",
+    "edge_index": "integer (edge_flange/edge_flange_sketch/edge_flange_finish, optional — the attach edge's stable index from analyze_model(edges); PREFERRED over ex/ey/ez, whose coordinate pick can miss a real edge (KNOWN-LIMITATIONS #6). Since v0.7.0 the simple edge_flange accepts it too (shared SelectFlangeEdge). For the two-call custom-profile flow pass the SAME index to both calls — the sketch step adds no solid geometry, so edge enumeration is stable)"
    }
   },
-  "output": "\u2192 see execution-response.json"
+  "output": "→ see execution-response.json"
  },
  "modify_dimension": {
   "description": "Universal parametric edit: sets a named display dimension's value in SI units (meters for length, radians for angle), rebuilds, and bumps state_version. Pairs with analyze_model(features), which reports each feature's dimension full-names + SI values. The keystone for building variants.",
@@ -616,92 +650,92 @@
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
    "params": {
-    "name": "string (required \u2014 dimension full-name exactly as analyze_model(features) reports it, e.g. 'D1@Boss-Extrude1@Part.Part')",
-    "value": "number (required \u2014 new value in SI: meters for length/distance, radians for angle)"
+    "name": "string (required — dimension full-name exactly as analyze_model(features) reports it, e.g. 'D1@Boss-Extrude1@Part.Part')",
+    "value": "number (required — new value in SI: meters for length/distance, radians for angle)"
    }
   },
-  "output": "\u2192 see execution-response.json (additionally returns result_geometry {dimension, requested, effective}: the value read back from SolidWorks after rebuild, for in-band verification)"
+  "output": "→ see execution-response.json (additionally returns result_geometry {dimension, requested, effective}: the value read back from SolidWorks after rebuild, for in-band verification)"
  },
  "edit_feature": {
-  "description": "Discriminated structural edit of a named feature: suppress | unsuppress | delete | rename. Each rebuilds and bumps state_version. NOTE: suppress/delete change topology, so earlier coordinate/edge/face selections may no longer resolve \u2014 re-query analyze_model afterwards.",
+  "description": "Discriminated structural edit of a named feature: suppress | unsuppress | delete | rename. Each rebuilds and bumps state_version. NOTE: suppress/delete change topology, so earlier coordinate/edge/face selections may no longer resolve — re-query analyze_model afterwards.",
   "input": {
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
    "params": {
-    "feature_name": "string (required \u2014 exact feature-tree name, e.g. 'Boss-Extrude1')",
+    "feature_name": "string (required — exact feature-tree name, e.g. 'Boss-Extrude1')",
     "action": "string (required: 'suppress', 'unsuppress', 'delete', or 'rename')",
-    "new_name": "string (required only for action='rename' \u2014 the new feature name)"
+    "new_name": "string (required only for action='rename' — the new feature name)"
    }
   },
-  "output": "\u2192 see execution-response.json \u2014 CadState.Features[0] holds the (possibly renamed) feature name (delete works for any feature type incl. sketches); empty for delete"
+  "output": "→ see execution-response.json — CadState.Features[0] holds the (possibly renamed) feature name (delete works for any feature type incl. sketches); empty for delete"
  },
  "activate_document": {
-  "description": "Switches the active SolidWorks document to an already-open one by title. Lifecycle op \u2014 does NOT check or increment state_version and does NOT change geometry. Lets a caller read/compare another open document (e.g. activate the original, analyze it, activate the copy).",
+  "description": "Switches the active SolidWorks document to an already-open one by title. Lifecycle op — does NOT check or increment state_version and does NOT change geometry. Lets a caller read/compare another open document (e.g. activate the original, analyze it, activate the copy).",
   "input": {
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
    "params": {
-    "title": "string (required \u2014 the title of an already-OPEN document, e.g. 'gear' or 'gear.SLDPRT')"
+    "title": "string (required — the title of an already-OPEN document, e.g. 'gear' or 'gear.SLDPRT')"
    }
   },
-  "output": "\u2192 see execution-response.json \u2014 CadState.ActiveDocument holds the now-active document title"
+  "output": "→ see execution-response.json — CadState.ActiveDocument holds the now-active document title"
  },
  "get_recipe": {
-  "description": "[ADAPTER-ONLY \u2014 no COM, no REST, no state_version] Serves the IR-generation recipe (cad-planner/recipe-usage.md) to the model section-by-section, plus the two cad-planner contract JSONs (feature-graph.schema.json = the capability registry; analysis-artifact.schema.json). The model calls this BEFORE writing an ir.graph or producing a reconstruction-grade drawing \u2014 token cost stays proportional to the task (index \u2192 only the needed sections). RESTORED 2026-09-03 (ADR-077) after ADR-069 had retired it for the recipe://usage/* resources: MCP resources live in the CLIENT's action space, not the model's, and no host in use here gives the model a way to read one \u2014 so the rules stopped reaching it entirely. The resources remain; both channels read the same file. Read-only file serving from the repo; no SolidWorks interaction.",
+  "description": "[ADAPTER-ONLY — no COM, no REST, no state_version] Serves the IR-generation recipe (cad-planner/recipe-usage.md) to the model section-by-section, plus the two cad-planner contract JSONs (feature-graph.schema.json = the capability registry; analysis-artifact.schema.json). The model calls this BEFORE writing an ir.graph or producing a reconstruction-grade drawing — token cost stays proportional to the task (index → only the needed sections). RESTORED 2026-09-03 (ADR-077) after ADR-069 had retired it for the recipe://usage/* resources: MCP resources live in the CLIENT's action space, not the model's, and no host in use here gives the model a way to read one — so the rules stopped reaching it entirely. The resources remain; both channels read the same file. Read-only file serving from the repo; no SolidWorks interaction.",
   "input": {
-   "operation_id": "n/a \u2014 pure file read, no execution call",
-   "state_version": "n/a \u2014 pure file read, no execution call",
+   "operation_id": "n/a — pure file read, no execution call",
+   "state_version": "n/a — pure file read, no execution call",
    "params": {
-    "section": "string enum (default 'index' \u2014 TOC + version header): 'contract' | 'canonicalization' | 'forward' (intent\u2192IR authoring for submit_feature_graph) | 'mapping' | 'mapping_part' | 'mapping_sheet_metal' | 'mapping_assembly' | 'verification' | 'reverse' (drawing\u2192part reading discipline) | 'coverage' | 'feature_graph_schema' (IR schema JSON) | 'analysis_artifact_schema' (artifact contract JSON)",
-    "profile": "string enum (default 'all'), meaningful for section='feature_graph_schema' only: 'part' drops the ASSEMBLY vocabulary (assembly_types_v06, ~2.4 KB); every feature type INCLUDING sheet metal stays, because a drawing is not known to be sheet metal until R21 decides. Both profiles omit the developer-only blocks the FILE must keep for gate 3 (_meta.status = the version narrative; covered_subset._note/._grammar_note/.assumptions = the machine-diff instructions). The covered_subset ARRAYS \u2014 the capability list itself \u2014 are never touched."
+    "section": "string enum (default 'index' — TOC + version header): 'contract' | 'canonicalization' | 'forward' (intent→IR authoring for submit_feature_graph) | 'mapping' | 'mapping_part' | 'mapping_sheet_metal' | 'mapping_assembly' | 'verification' | 'reverse' (drawing→part reading discipline) | 'coverage' | 'feature_graph_schema' (IR schema JSON) | 'analysis_artifact_schema' (artifact contract JSON)",
+    "profile": "string enum (default 'all'), meaningful for section='feature_graph_schema' only: 'part' drops the ASSEMBLY vocabulary (assembly_types_v06, ~2.4 KB); every feature type INCLUDING sheet metal stays, because a drawing is not known to be sheet metal until R21 decides. Both profiles omit the developer-only blocks the FILE must keep for gate 3 (_meta.status = the version narrative; covered_subset._note/._grammar_note/.assumptions = the machine-diff instructions). The covered_subset ARRAYS — the capability list itself — are never touched."
    }
   },
   "output": "The requested recipe section as markdown (or the trimmed contract JSON for the two schema sections)."
  },
  "save_analysis": {
-  "description": "[ADAPTER-ONLY \u2014 Phase A analysis pipeline, ADR-040] NOT a COM/execution tool: it has NO ToolController/SolidWorksService case. The adapter orchestrates EXISTING reads (open_document/activate_document + analyze_model features/mass_properties/geometry), computes the file's sha256, and writes the persistent analysis artifact <folder>/.solidpilot/<filename>.analysis.json per cad-planner/contracts/analysis-artifact.schema.json. Artifacts are a CACHE, never truth: identity.source_hash mismatch against the current file = stale, re-analyze. The ir block is left null (the AI/IR pass fills it later \u2014 the model gets the mapping rules from the `recipe://usage/*` MCP resources). Leaves the part open and active.",
+  "description": "[ADAPTER-ONLY — Phase A analysis pipeline, ADR-040] NOT a COM/execution tool: it has NO ToolController/SolidWorksService case. The adapter orchestrates EXISTING reads (open_document/activate_document + analyze_model features/mass_properties/geometry), computes the file's sha256, and writes the persistent analysis artifact <folder>/.solidpilot/<filename>.analysis.json per cad-planner/contracts/analysis-artifact.schema.json. Artifacts are a CACHE, never truth: identity.source_hash mismatch against the current file = stale, re-analyze. The ir block is left null (the AI/IR pass fills it later — the model gets the mapping rules from the `recipe://usage/*` MCP resources). Leaves the part open and active.",
   "input": {
-   "operation_id": "n/a at this level \u2014 each underlying read carries its own operation_id (uuid4) on /api/tool/execute",
-   "state_version": "n/a at this level \u2014 the underlying calls thread the adapter's tracked state_version (one-shot resync-retry on INVALID_STATE_VERSION)",
+   "operation_id": "n/a at this level — each underlying read carries its own operation_id (uuid4) on /api/tool/execute",
+   "state_version": "n/a at this level — the underlying calls thread the adapter's tracked state_version (one-shot resync-retry on INVALID_STATE_VERSION)",
    "params": {
-    "file_path": "string (required \u2014 absolute path of the .SLDPRT to analyze; v0 is parts-only, drawing/assembly artifacts arrive with later pipeline steps)"
+    "file_path": "string (required — absolute path of the .SLDPRT to analyze; v0 is parts-only, drawing/assembly artifacts arrive with later pipeline steps)"
    }
   },
-  "output": "Token-frugal summary string: artifact path + feature/parameter counts + topology counts + linked-drawing count + hash prefix. The artifact JSON itself stays on disk \u2014 read it from there when the full content is needed."
+  "output": "Token-frugal summary string: artifact path + feature/parameter counts + topology counts + linked-drawing count + hash prefix. The artifact JSON itself stays on disk — read it from there when the full content is needed."
  },
  "rebuild_from_ir": {
-  "description": "ADAPTER-ONLY orchestration (no ToolController/SolidWorksService case) \u2014 the analysis pipeline's IR door (IR-ADR-005: two doors, ONE pycompiler). Reads an analysis artifact JSON, takes ir.graph, optionally opens a fresh part, and executes the graph through the SAME deterministic pycompiler as the forward door submit_feature_graph (two doors, one compiler), over the existing /api/tool/execute + /state endpoints. Reports a stale source hash informatively (cache discipline, ADR-040); resyncs the adapter's state_version after the run (many state-bumping sub-ops happen outside the normal _call path).",
+  "description": "ADAPTER-ONLY orchestration (no ToolController/SolidWorksService case) — the analysis pipeline's IR door (IR-ADR-005: two doors, ONE pycompiler). Reads an analysis artifact JSON, takes ir.graph, optionally opens a fresh part, and executes the graph through the SAME deterministic pycompiler as the forward door submit_feature_graph (two doors, one compiler), over the existing /api/tool/execute + /state endpoints. Reports a stale source hash informatively (cache discipline, ADR-040); resyncs the adapter's state_version after the run (many state-bumping sub-ops happen outside the normal _call path).",
   "input": {
-   "operation_id": "n/a at this level \u2014 each lowered sub-op carries its own operation_id (uuid4) and state_version on /api/tool/execute",
-   "state_version": "n/a at this level \u2014 the adapter resyncs its local state_version from GET /state after the run",
+   "operation_id": "n/a at this level — each lowered sub-op carries its own operation_id (uuid4) and state_version on /api/tool/execute",
+   "state_version": "n/a at this level — the adapter resyncs its local state_version from GET /state after the run",
    "params": {
-    "artifact_path": "string (required \u2014 absolute path of the <file>.analysis.json artifact whose ir.graph to rebuild)",
-    "fresh_document": "boolean (optional, default true \u2014 open a NEW blank part before the rebuild; the normal round-trip flow)"
+    "artifact_path": "string (required — absolute path of the <file>.analysis.json artifact whose ir.graph to rebuild)",
+    "fresh_document": "boolean (optional, default true — open a NEW blank part before the rebuild; the normal round-trip flow)"
    }
   },
-  "output": "The compiler's per-node summary string: COMPLETED n/n nodes (+ artifact name, + source_stale flag when the source file changed since analysis) or FAILED with the feature-level error and how far it got (partial geometry may remain \u2014 CAD ops are not transactional)."
+  "output": "The compiler's per-node summary string: COMPLETED n/n nodes (+ artifact name, + source_stale flag when the source file changed since analysis) or FAILED with the feature-level error and how far it got (partial geometry may remain — CAD ops are not transactional)."
  },
  "submit_feature_graph": {
-  "description": "ADAPTER-ONLY orchestration (no ToolController/SolidWorksService case) \u2014 the FORWARD Feature Graph IR door (re-enabled gate-free 2026-07-16, IR-ADR-017): builds a part or assembly from a CAD-neutral Feature Graph IR in ONE call. The adapter's deterministic pycompiler (compiler/solidworks/pycompiler \u2014 the SAME compiler rebuild_from_ir uses; two doors, one compiler, IR-ADR-005) lowers each IR node to ordered calls on the EXISTING low-level tools over /api/tool/execute + /state, and resolves references (geometric anchors, runtime feature names) against live geometry. Vocabulary = cad-planner/contracts/feature-graph.schema.json 0.7.0-draft (the capability registry; served to the model as the `schema://feature-graph` MCP resource). fresh_document=true opens a new blank document first \u2014 the graph's node types decide part vs assembly. Resyncs the adapter's state_version after every run (many state-bumping sub-ops happen outside the normal _call path).",
+  "description": "ADAPTER-ONLY orchestration (no ToolController/SolidWorksService case) — the FORWARD Feature Graph IR door (re-enabled gate-free 2026-07-16, IR-ADR-017): builds a part or assembly from a CAD-neutral Feature Graph IR in ONE call. The adapter's deterministic pycompiler (compiler/solidworks/pycompiler — the SAME compiler rebuild_from_ir uses; two doors, one compiler, IR-ADR-005) lowers each IR node to ordered calls on the EXISTING low-level tools over /api/tool/execute + /state, and resolves references (geometric anchors, runtime feature names) against live geometry. Vocabulary = cad-planner/contracts/feature-graph.schema.json 0.7.0-draft (the capability registry; served to the model as the `schema://feature-graph` MCP resource). fresh_document=true opens a new blank document first — the graph's node types decide part vs assembly. Resyncs the adapter's state_version after every run (many state-bumping sub-ops happen outside the normal _call path).",
   "input": {
-   "operation_id": "n/a at this level \u2014 each lowered sub-op carries its own operation_id (uuid4) and state_version on /api/tool/execute",
-   "state_version": "n/a at this level \u2014 the adapter resyncs its local state_version from GET /state after the run",
+   "operation_id": "n/a at this level — each lowered sub-op carries its own operation_id (uuid4) and state_version on /api/tool/execute",
+   "state_version": "n/a at this level — the adapter resyncs its local state_version from GET /state after the run",
    "params": {
-    "graph": "string (required \u2014 JSON Feature Graph IR per cad-planner/contracts/feature-graph.schema.json; lengths in METERS, angles in RADIANS)",
-    "fresh_document": "boolean (optional, default true \u2014 open a new blank document first: part graphs a part, assembly graphs an assembly; false = build into the current active document)"
+    "graph": "string (required — JSON Feature Graph IR per cad-planner/contracts/feature-graph.schema.json; lengths in METERS, angles in RADIANS)",
+    "fresh_document": "boolean (optional, default true — open a new blank document first: part graphs a part, assembly graphs an assembly; false = build into the current active document)"
    }
   },
   "output": "Per-node report string: COMPLETED (nodes built) or FAILED (feature-level error + how far it got). Partial geometry may remain on failure (CAD ops are not transactional). Not itself in the state_version/idempotency envelope; its sub-ops are."
  },
  "compare_parts": {
-  "description": "ADAPTER-ONLY orchestration (no ToolController/SolidWorksService case) \u2014 the objective two-part diff / round-trip verifier (ADR-040, A0). Each doc argument is either an absolute .SLDPRT path (opened from disk) or an open document's TITLE (e.g. an unsaved rebuild). Activates each in turn and runs analyze_model(geometry + mass_properties); compares topology (bodies/faces/edges/vertices), volume, surface area, CG. Reports the DECIDED verified-criteria verdict (topology EXACT and |dV| <= 1% and |dA| <= 1%) \u2014 writing ir.verification into an artifact stays the caller's job. Geometry-read-only; doc_b is left active. bbox comparison pending (analyze does not expose it).",
+  "description": "ADAPTER-ONLY orchestration (no ToolController/SolidWorksService case) — the objective two-part diff / round-trip verifier (ADR-040, A0). Each doc argument is either an absolute .SLDPRT path (opened from disk) or an open document's TITLE (e.g. an unsaved rebuild). Activates each in turn and runs analyze_model(geometry + mass_properties); compares topology (bodies/faces/edges/vertices), volume, surface area, CG. Reports the DECIDED verified-criteria verdict (topology EXACT and |dV| <= 1% and |dA| <= 1%) — writing ir.verification into an artifact stays the caller's job. Geometry-read-only; doc_b is left active. bbox comparison pending (analyze does not expose it).",
   "input": {
-   "operation_id": "n/a at this level \u2014 each underlying read carries its own operation_id (uuid4) on /api/tool/execute",
-   "state_version": "n/a at this level \u2014 the underlying calls thread the adapter's tracked state_version (one-shot resync-retry on INVALID_STATE_VERSION)",
+   "operation_id": "n/a at this level — each underlying read carries its own operation_id (uuid4) on /api/tool/execute",
+   "state_version": "n/a at this level — the underlying calls thread the adapter's tracked state_version (one-shot resync-retry on INVALID_STATE_VERSION)",
    "params": {
-    "doc_a": "string (required \u2014 REFERENCE document: absolute .SLDPRT path or open-doc title; deltas are relative to it \u2014 normally the ORIGINAL)",
-    "doc_b": "string (required \u2014 comparison document: absolute .SLDPRT path or open-doc title \u2014 normally the REBUILD)",
-    "detail": "string (optional \u2014 'faces' also lists EXTRA (in doc_b only) / MISSING (in doc_a only) surfaces, matched by supporting plane or cylinder axis+radius; blank = summary only)"
+    "doc_a": "string (required — REFERENCE document: absolute .SLDPRT path or open-doc title; deltas are relative to it — normally the ORIGINAL)",
+    "doc_b": "string (required — comparison document: absolute .SLDPRT path or open-doc title — normally the REBUILD)",
+    "detail": "string (optional — 'faces' also lists EXTRA (in doc_b only) / MISSING (in doc_a only) surfaces, matched by supporting plane or cylinder axis+radius; blank = summary only)"
    }
   },
   "output": "One-line report: verified_criteria PASS/FAIL | topology A/B (EXACT|DIFFER) | volume A/B + dV% | area A/B + dA% | cg_distance. With detail='faces', a trailing faces: matched/MISSING/EXTRA breakdown."
@@ -723,7 +757,7 @@
    "operation_id": "string (required, unique idempotency key)",
    "state_version": "integer (required, must match current execution state)",
    "params": {
-    "analysis_type": "string (required): 'components' | 'components_flat' (leaf occurrences across nesting levels, root-space transforms \u2014 wrapper flattening) | 'mates' | 'faces' | 'edges'",
+    "analysis_type": "string (required): 'components' | 'components_flat' (leaf occurrences across nesting levels, root-space transforms — wrapper flattening) | 'mates' | 'faces' | 'edges'",
     "component": "string (required for faces/edges - the component's Name2, e.g. 'Shaft-1')"
    }
   },

@@ -8,19 +8,171 @@ using SolidWorks.Interop.sldworks;
 using SolidWorks.Interop.swconst;
 using SolidworksExecution.Infrastructure;
 using SolidworksExecution.Models;
+using SolidworksExecution.Services.Interfaces;
 
 namespace SolidworksExecution.Services
 {
-    public partial class SolidWorksService
+    public partial class SolidWorksService :
+        IDrawingService,
+        IDocumentService,
+        IPartService,
+        ISketchService,
+        IAssemblyService,
+        ISheetMetalService,
+        IAnalysisService
     {
         private readonly IOperationGuard _guard;
         private ISldWorks _solidWorks;
+        private static readonly object _comLock = new object();
+        private static string _cachedPartTemplate;
+        private static string _cachedDrawingTemplate;
 
         public bool IsConnected { get; private set; }
 
         public SolidWorksService(IOperationGuard guard)
         {
             _guard = guard;
+        }
+
+        protected ExecutionResponse ExecuteGuarded(
+            ToolRequest request,
+            Func<IModelDoc2, ExecutionResponse> action,
+            bool requiresDrawing = false,
+            bool requiresPartOrAssembly = false,
+            bool requiresActiveDoc = true,
+            bool incrementsState = true)
+        {
+            var sw = Stopwatch.StartNew();
+            ExecLog.Write($"[{request.Tool}] START op={request.OperationId} incomingState={request.StateVersion}");
+
+            lock (_comLock)
+            {
+                if (_guard.IsDuplicate(request.OperationId))
+                {
+                    ExecLog.Write($"[{request.Tool}] DUPLICATE op={request.OperationId}");
+                    return _guard.GetDuplicate(request.OperationId);
+                }
+
+                if (!_guard.IsStateVersionValid(request.StateVersion))
+                {
+                    int current = _guard.GetCurrentStateVersion();
+                    ExecLog.Write($"[{request.Tool}] INVALID_STATE_VERSION expected={current} got={request.StateVersion}");
+                    return BuildFailed(request.OperationId, current,
+                        "INVALID_STATE_VERSION", $"Incoming state_version {request.StateVersion} does not match current state {current}.");
+                }
+
+                if (!EnsureConnected())
+                {
+                    ExecLog.Write($"[{request.Tool}] COM_ATTACH_FAILED op={request.OperationId}");
+                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                        "COM_ATTACH_FAILED", "SolidWorks process not found or COM not registered.");
+                }
+
+                try
+                {
+                    var modelDoc = _solidWorks.IActiveDoc2 as IModelDoc2;
+                    if (modelDoc == null && (requiresDrawing || requiresPartOrAssembly || requiresActiveDoc))
+                    {
+                        ExecLog.Write($"[{request.Tool}] NO_ACTIVE_DOCUMENT op={request.OperationId}");
+                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                            "NO_ACTIVE_DOCUMENT", "No active document found in SolidWorks.");
+                    }
+
+                    if (requiresPartOrAssembly)
+                    {
+                        if (modelDoc == null || !(modelDoc is IPartDoc || modelDoc is IAssemblyDoc))
+                        {
+                            var pd = FindOpenPartOrAssembly();
+                            if (pd != null)
+                            {
+                                int actErr = 0;
+                                try { _solidWorks.ActivateDoc3(pd.GetTitle(), false, 0, ref actErr); } catch { }
+                                modelDoc = pd;
+                            }
+                        }
+                        if (modelDoc == null || !(modelDoc is IPartDoc || modelDoc is IAssemblyDoc))
+                        {
+                            ExecLog.Write($"[{request.Tool}] WRONG_DOCUMENT_TYPE (not part or assembly) op={request.OperationId}");
+                            return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                                "WRONG_DOCUMENT_TYPE", $"{request.Tool} requires an active part or assembly document.");
+                        }
+                    }
+
+                    if (requiresDrawing)
+                    {
+                        var drawingDoc = modelDoc as IDrawingDoc;
+                        if (drawingDoc == null)
+                        {
+                            var dd = FindOpenDocument<IDrawingDoc>();
+                            if (dd != null)
+                            {
+                                int actErr = 0;
+                                try { _solidWorks.ActivateDoc3(((IModelDoc2)dd).GetTitle(), false, 0, ref actErr); } catch { }
+                                modelDoc = (IModelDoc2)dd;
+                                drawingDoc = dd;
+                            }
+                        }
+                        if (drawingDoc == null)
+                        {
+                            ExecLog.Write($"[{request.Tool}] WRONG_DOCUMENT_TYPE (not a drawing) op={request.OperationId}");
+                            return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                                "WRONG_DOCUMENT_TYPE", $"{request.Tool} requires an active drawing document.");
+                        }
+                    }
+
+                    var response = action(modelDoc);
+                    if (response != null && response.Status == "COMPLETED")
+                    {
+                        if (incrementsState)
+                        {
+                            _guard.RegisterCompleted(request.OperationId, response);
+                        }
+                        ExecLog.Write($"[{request.Tool}] COMPLETED op={request.OperationId} elapsed={sw.ElapsedMilliseconds}ms nextState={response.StateVersion}");
+                    }
+                    else
+                    {
+                        ExecLog.Write($"[{request.Tool}] FAILED op={request.OperationId} elapsed={sw.ElapsedMilliseconds}ms code={response?.Error?.Code} msg={response?.Error?.Message}");
+                    }
+                    return response;
+                }
+                catch (COMException ex)
+                {
+                    ExecLog.Write($"[{request.Tool}] COM_ERROR op={request.OperationId} HRESULT=0x{ex.ErrorCode:X8} msg={ex.Message}\n{ex.StackTrace}");
+                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "COM_ERROR", ex.Message);
+                }
+                catch (Exception ex)
+                {
+                    ExecLog.Write($"[{request.Tool}] UNEXPECTED_ERROR op={request.OperationId} msg={ex.Message}\n{ex.StackTrace}");
+                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "UNEXPECTED_ERROR", ex.Message);
+                }
+            }
+        }
+
+        protected bool ValidateStandardGuards(ToolRequest request, out ExecutionResponse failedResponse)
+        {
+            failedResponse = null;
+            if (_guard.IsDuplicate(request.OperationId))
+            {
+                failedResponse = _guard.GetDuplicate(request.OperationId);
+                return false;
+            }
+
+            if (!_guard.IsStateVersionValid(request.StateVersion))
+            {
+                int current = _guard.GetCurrentStateVersion();
+                failedResponse = BuildFailed(request.OperationId, current,
+                    "INVALID_STATE_VERSION", $"Incoming state_version {request.StateVersion} does not match current state {current}.");
+                return false;
+            }
+
+            if (!EnsureConnected())
+            {
+                failedResponse = BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                    "COM_ATTACH_FAILED", "SolidWorks process not found or COM not registered.");
+                return false;
+            }
+
+            return true;
         }
 
         // SolidWorks COM must be called from an STA thread.
@@ -58,10 +210,80 @@ namespace SolidworksExecution.Services
             catch { /* visibility is best-effort; never fail over it */ }
         }
 
+        public T FindOpenDocument<T>() where T : class
+        {
+            if (_solidWorks == null) return null;
+            try
+            {
+                object[] docs = _solidWorks.GetDocuments() as object[];
+                if (docs != null)
+                {
+                    foreach (var d in docs)
+                    {
+                        if (d is T target) return target;
+                    }
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        public IModelDoc2 FindOpenPartOrAssembly()
+        {
+            var p = FindOpenDocument<IPartDoc>() as IModelDoc2;
+            if (p != null) return p;
+            return FindOpenDocument<IAssemblyDoc>() as IModelDoc2;
+        }
+
         private bool EnsureConnected()
         {
-            if (_solidWorks != null) return true;
-            return Connect();
+            if (_solidWorks != null)
+            {
+                try
+                {
+                    _solidWorks.RevisionNumber();
+                    return true;
+                }
+                catch
+                {
+                    _solidWorks = null;
+                    IsConnected = false;
+                }
+            }
+
+            if (Connect()) return true;
+
+            var running = SolidWorksProcesses();
+            if (running.Count > 0)
+            {
+                if (RetryAttach(TimeSpan.FromSeconds(30))) return true;
+            }
+            else
+            {
+                // SolidWorks is not running (e.g. terminated or cleanly recycled by ProcessRecycler).
+                // Launch a fresh instance to ensure continuous batch operation across 30,000+ files!
+                try
+                {
+                    ExecLog.Write("[EnsureConnected] SolidWorks not running. Launching new instance for batch continuation...");
+                    var progType = Type.GetTypeFromProgID("SldWorks.Application");
+                    if (progType != null)
+                    {
+                        _solidWorks = (ISldWorks)Activator.CreateInstance(progType);
+                        EnsureVisible();
+                        if (RetryAttach(TimeSpan.FromSeconds(90)))
+                        {
+                            IsConnected = true;
+                            return true;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ExecLog.Write($"[EnsureConnected] Failed to launch SolidWorks: {ex.Message}");
+                }
+            }
+
+            return false;
         }
 
         // The PIDs of every running SolidWorks, regardless of whether COM can see them. This is the
@@ -249,25 +471,38 @@ namespace SolidworksExecution.Services
 
                 if (string.IsNullOrEmpty(templatePath))
                 {
-                    // Ask SolidWorks for the user-configured default part template (locale-agnostic)
-                    templatePath = _solidWorks.GetUserPreferenceStringValue(
-                        (int)swUserPreferenceStringValue_e.swDefaultTemplatePart);
+                    if (!string.IsNullOrEmpty(_cachedPartTemplate) && System.IO.File.Exists(_cachedPartTemplate))
+                    {
+                        templatePath = _cachedPartTemplate;
+                    }
+                    else
+                    {
+                        templatePath = _solidWorks.GetUserPreferenceStringValue(
+                            (int)swUserPreferenceStringValue_e.swDefaultTemplatePart);
+
+                        if (string.IsNullOrEmpty(templatePath) || !System.IO.File.Exists(templatePath))
+                        {
+                            string templatesDir = System.IO.Path.Combine(
+                                System.Environment.GetFolderPath(System.Environment.SpecialFolder.CommonApplicationData),
+                                "SolidWorks");
+                            if (System.IO.Directory.Exists(templatesDir))
+                            {
+                                var found = System.IO.Directory.GetFiles(templatesDir, "*.prtdot",
+                                    System.IO.SearchOption.AllDirectories);
+                                if (found.Length > 0)
+                                    templatePath = found[0];
+                            }
+                        }
+
+                        if (!string.IsNullOrEmpty(templatePath) && System.IO.File.Exists(templatePath))
+                            _cachedPartTemplate = templatePath;
+                    }
                 }
 
                 if (string.IsNullOrEmpty(templatePath) || !System.IO.File.Exists(templatePath))
-                {
-                    // Fallback: scan the standard templates folder for any .prtdot file
-                    string templatesDir = System.IO.Path.Combine(
-                        System.Environment.GetFolderPath(System.Environment.SpecialFolder.CommonApplicationData),
-                        "SolidWorks");
-                    var found = System.IO.Directory.GetFiles(templatesDir, "*.prtdot",
-                        System.IO.SearchOption.AllDirectories);
-                    if (found.Length == 0)
-                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                            "TEMPLATE_NOT_FOUND",
-                            "No part template (.prtdot) found. Set a default template in SolidWorks → Tools → Options → Default Templates.");
-                    templatePath = found[0];
-                }
+                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                        "TEMPLATE_NOT_FOUND",
+                        "No part template (.prtdot) found. Set a default template in SolidWorks → Tools → Options → Default Templates.");
 
                 object doc = _solidWorks.NewDocument(templatePath, 0, 0, 0);
                 var modelDoc = doc as IModelDoc2;
@@ -316,16 +551,8 @@ namespace SolidworksExecution.Services
         // Bumps state_version (a new active document is established), same effect class as open_new_part.
         public ExecutionResponse OpenDocument(ToolRequest request)
         {
-            if (_guard.IsDuplicate(request.OperationId))
-                return _guard.GetDuplicate(request.OperationId);
-
-            if (!_guard.IsStateVersionValid(request.StateVersion))
-                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                    "INVALID_STATE_VERSION", "Incoming state_version does not match current state.");
-
-            if (!EnsureConnected())
-                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                    "COM_ATTACH_FAILED", "SolidWorks process not found or COM not registered.");
+            if (!ValidateStandardGuards(request, out var failed))
+                return failed;
 
             try
             {
@@ -526,7 +753,7 @@ namespace SolidworksExecution.Services
                     {
                         StateVersion = _guard.GetCurrentStateVersion(),
                         ActiveDocument = modelDoc.GetTitle(),
-                        DocumentType = "PART",
+                        DocumentType = modelDoc is IDrawingDoc ? "DRAWING" : (modelDoc is IAssemblyDoc ? "ASSEMBLY" : "PART"),
                         ActiveSketch = activeSketch != null ? (activeSketch as IFeature)?.Name : null,
                         Features = featureNames,
                         Dimensions = new List<string>()
@@ -548,16 +775,8 @@ namespace SolidworksExecution.Services
 
         public ExecutionResponse CloseDocument(ToolRequest request)
         {
-            if (_guard.IsDuplicate(request.OperationId))
-                return _guard.GetDuplicate(request.OperationId);
-
-            if (!_guard.IsStateVersionValid(request.StateVersion))
-                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                    "INVALID_STATE_VERSION", "Incoming state_version does not match current state.");
-
-            if (!EnsureConnected())
-                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                    "COM_ATTACH_FAILED", "SolidWorks process not found or COM not registered.");
+            if (!ValidateStandardGuards(request, out var failed))
+                return failed;
 
             try
             {
@@ -569,10 +788,9 @@ namespace SolidworksExecution.Services
                 {
                     // Close EVERYTHING, including invisibly-loaded component docs that a
                     // per-active-doc close loop can never reach (they are never active).
-                    // Live lesson: a lingering doc with the same TITLE blocks opening another
-                    // folder's same-named part (swFileWithSameTitleAlreadyOpen = 65536) and
-                    // keeps files locked on disk. Discards unsaved changes (true).
                     _solidWorks.CloseAllDocuments(true);
+                    ProcessRecycler.Instance.NotifyDocumentProcessed();
+                    ComScope.CollectGarbage();
                 }
                 else
                 {
@@ -581,9 +799,6 @@ namespace SolidworksExecution.Services
                         return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                             "NO_ACTIVE_DOCUMENT", "No active document found in SolidWorks.");
 
-                    // IModelDoc2.Close() is not implemented in the interop (throws NotImplementedException);
-                    // close via ISldWorks.CloseDoc(title). CloseDoc discards unsaved changes silently, so
-                    // when save=true we must persist first. GetTitle() works for unsaved docs too (e.g. "Part2").
                     string docTitle = modelDoc.GetTitle();
                     if (save)
                     {
@@ -591,6 +806,17 @@ namespace SolidworksExecution.Services
                         modelDoc.Save3((int)swSaveAsOptions_e.swSaveAsOptions_Silent, ref saveErrors, ref saveWarnings);
                     }
                     _solidWorks.CloseDoc(docTitle);
+                    ComScope.Release(modelDoc);
+                    modelDoc = null;
+
+                    ProcessRecycler.Instance.NotifyDocumentProcessed();
+                    ComScope.CollectGarbage();
+                }
+
+                if (ProcessRecycler.Instance.ShouldRecycle(_solidWorks, out var recycleReason))
+                {
+                    ExecLog.Write($"[CloseDocument] Auto-recycling SolidWorks: {recycleReason}");
+                    ProcessRecycler.Instance.Recycle(ref _solidWorks);
                 }
 
                 var response = new ExecutionResponse
@@ -698,7 +924,7 @@ namespace SolidworksExecution.Services
                     Error = null
                 };
 
-                _guard.RegisterCompleted(request.OperationId, response);
+                _guard.RegisterCompleted(request.OperationId, response, incrementsState: false);
                 return response;
             }
             catch (COMException ex)
@@ -764,17 +990,29 @@ namespace SolidworksExecution.Services
                 int exportErrors = 0;
                 int exportWarnings = 0;
                 bool success;
+                if (isDrawing)
+                {
+                    try { modelDoc.ViewZoomtofit2(); } catch { }
+                    try { modelDoc.GraphicsRedraw2(); } catch { }
+                }
 
                 if (format == "PDF")
                 {
                     // PDF requires ExportPdfData options object
                     var exportData = _solidWorks.GetExportFileData(
                         (int)swExportDataFileType_e.swExportPdfData) as ExportPdfData;
-                    success = modelDoc.Extension.SaveAs3(filePath,
-                        (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
-                        (int)swSaveAsOptions_e.swSaveAsOptions_Silent,
-                        exportData, null,
-                        ref exportErrors, ref exportWarnings);
+                    try
+                    {
+                        success = modelDoc.Extension.SaveAs3(filePath,
+                            (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
+                            (int)swSaveAsOptions_e.swSaveAsOptions_Silent,
+                            exportData, null,
+                            ref exportErrors, ref exportWarnings);
+                    }
+                    finally
+                    {
+                        ComScope.Release(exportData);
+                    }
                 }
                 else
                 {
@@ -809,7 +1047,9 @@ namespace SolidworksExecution.Services
                 };
 
                 // Register as completed for idempotency but with same state_version
-                _guard.RegisterCompleted(request.OperationId, response);
+                _guard.RegisterCompleted(request.OperationId, response, incrementsState: false);
+                ProcessRecycler.Instance.NotifyDocumentProcessed();
+                ComScope.CollectGarbage();
                 return response;
             }
             catch (COMException ex)
@@ -868,45 +1108,60 @@ namespace SolidworksExecution.Services
                 var exported = new List<string>();
                 var failed = new List<string>();
 
-                foreach (var fToken in formatArray)
+                bool prevTree = true;
+                try { prevTree = modelDoc.FeatureManager.EnableFeatureTree; modelDoc.FeatureManager.EnableFeatureTree = false; } catch { }
+
+                try
                 {
-                    string fmt = fToken.Value<string>()?.ToUpperInvariant();
-                    if (string.IsNullOrEmpty(fmt)) continue;
-
-                    if ((fmt == "DWG" || fmt == "DXF") && !isDrawing)
+                    foreach (var fToken in formatArray)
                     {
-                        failed.Add($"{fmt}:WRONG_DOCUMENT_TYPE");
-                        continue;
+                        string fmt = fToken.Value<string>()?.ToUpperInvariant();
+                        if (string.IsNullOrEmpty(fmt)) continue;
+
+                        if ((fmt == "DWG" || fmt == "DXF") && !isDrawing)
+                        {
+                            failed.Add($"{fmt}:WRONG_DOCUMENT_TYPE");
+                            continue;
+                        }
+
+                        string ext = fmt == "IGES" ? "igs" : fmt.ToLowerInvariant();
+                        string outPath = filePathBase + "." + ext;
+
+                        int exportErrors = 0;
+                        int exportWarnings = 0;
+                        bool success;
+
+                        if (fmt == "PDF")
+                        {
+                            var exportData = _solidWorks.GetExportFileData(
+                                (int)swExportDataFileType_e.swExportPdfData) as ExportPdfData;
+                            try
+                            {
+                                success = modelDoc.Extension.SaveAs3(outPath,
+                                    (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
+                                    (int)swSaveAsOptions_e.swSaveAsOptions_Silent,
+                                    exportData, null, ref exportErrors, ref exportWarnings);
+                            }
+                            finally
+                            {
+                                ComScope.Release(exportData);
+                            }
+                        }
+                        else
+                        {
+                            success = modelDoc.Extension.SaveAs3(outPath,
+                                (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
+                                (int)swSaveAsOptions_e.swSaveAsOptions_Silent,
+                                null, null, ref exportErrors, ref exportWarnings);
+                        }
+
+                        if (success) exported.Add(outPath);
+                        else failed.Add($"{fmt}:errors={exportErrors}");
                     }
-
-                    // SolidWorks infers the format from the extension; its IGES translator only
-                    // recognizes .igs (not .iges → SaveAs error 256 swFileSaveAsNotSupported).
-                    string ext = fmt == "IGES" ? "igs" : fmt.ToLowerInvariant();
-                    string outPath = filePathBase + "." + ext;
-
-                    int exportErrors = 0;
-                    int exportWarnings = 0;
-                    bool success;
-
-                    if (fmt == "PDF")
-                    {
-                        var exportData = _solidWorks.GetExportFileData(
-                            (int)swExportDataFileType_e.swExportPdfData) as ExportPdfData;
-                        success = modelDoc.Extension.SaveAs3(outPath,
-                            (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
-                            (int)swSaveAsOptions_e.swSaveAsOptions_Silent,
-                            exportData, null, ref exportErrors, ref exportWarnings);
-                    }
-                    else
-                    {
-                        success = modelDoc.Extension.SaveAs3(outPath,
-                            (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
-                            (int)swSaveAsOptions_e.swSaveAsOptions_Silent,
-                            null, null, ref exportErrors, ref exportWarnings);
-                    }
-
-                    if (success) exported.Add(outPath);
-                    else failed.Add($"{fmt}:errors={exportErrors}");
+                }
+                finally
+                {
+                    try { modelDoc.FeatureManager.EnableFeatureTree = prevTree; } catch { }
                 }
 
                 if (exported.Count == 0)
@@ -931,7 +1186,9 @@ namespace SolidworksExecution.Services
                     Error = null
                 };
 
-                _guard.RegisterCompleted(request.OperationId, response);
+                _guard.RegisterCompleted(request.OperationId, response, incrementsState: false);
+                ProcessRecycler.Instance.NotifyDocumentProcessed();
+                ComScope.CollectGarbage();
                 return response;
             }
             catch (COMException ex)
@@ -1122,7 +1379,7 @@ namespace SolidworksExecution.Services
             return found;
         }
 
-        private ExecutionResponse BuildFailed(string operationId, int stateVersion, string code, string message)
+        protected ExecutionResponse BuildFailed(string operationId, int stateVersion, string code, string message)
         {
             return new ExecutionResponse
             {

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using Newtonsoft.Json.Linq;
 using SolidWorks.Interop.sldworks;
@@ -13,6 +14,31 @@ namespace SolidworksExecution.Services
     // SolidWorksService partial: technical-drawing tools (views, sections, auto-dimension, center marks, callouts) and the drawing readers.
     public partial class SolidWorksService
     {
+
+        private static List<IView> GetAllDrawingViews(IDrawingDoc drawingDoc, bool includeSheetView = false)
+        {
+            var views = new List<IView>();
+            if (drawingDoc == null) return views;
+            try
+            {
+                object vo = drawingDoc.GetFirstView();
+                int guard = 0;
+                while (vo != null && guard++ < 1000)
+                {
+                    var v = vo as IView;
+                    if (v == null) break;
+                    object next = null;
+                    try { next = v.GetNextView(); } catch { }
+                    if (includeSheetView || v.Type != 1)
+                    {
+                        views.Add(v);
+                    }
+                    vo = next;
+                }
+            }
+            catch { }
+            return views;
+        }
 
         public ExecutionResponse CreateDrawing(ToolRequest request)
         {
@@ -30,25 +56,38 @@ namespace SolidworksExecution.Services
             try
             {
                 var p = request.Params as JObject;
-                string modelPath = p?.Value<string>("model_path") ?? "";
+                string templatePath = null;
+                if (!string.IsNullOrEmpty(_cachedDrawingTemplate) && System.IO.File.Exists(_cachedDrawingTemplate))
+                {
+                    templatePath = _cachedDrawingTemplate;
+                }
+                else
+                {
+                    templatePath = _solidWorks.GetUserPreferenceStringValue(
+                        (int)swUserPreferenceStringValue_e.swDefaultTemplateDrawing);
 
-                // Discover drawing template (.drwdot) — same pattern as OpenNewPart
-                string templatePath = _solidWorks.GetUserPreferenceStringValue(
-                    (int)swUserPreferenceStringValue_e.swDefaultTemplateDrawing);
+                    if (string.IsNullOrEmpty(templatePath) || !System.IO.File.Exists(templatePath))
+                    {
+                        string templatesDir = System.IO.Path.Combine(
+                            System.Environment.GetFolderPath(System.Environment.SpecialFolder.CommonApplicationData),
+                            "SolidWorks");
+                        if (System.IO.Directory.Exists(templatesDir))
+                        {
+                            var found = System.IO.Directory.GetFiles(templatesDir, "*.drwdot",
+                                System.IO.SearchOption.AllDirectories);
+                            if (found.Length > 0)
+                                templatePath = found[0];
+                        }
+                    }
+
+                    if (!string.IsNullOrEmpty(templatePath) && System.IO.File.Exists(templatePath))
+                        _cachedDrawingTemplate = templatePath;
+                }
 
                 if (string.IsNullOrEmpty(templatePath) || !System.IO.File.Exists(templatePath))
-                {
-                    string templatesDir = System.IO.Path.Combine(
-                        System.Environment.GetFolderPath(System.Environment.SpecialFolder.CommonApplicationData),
-                        "SolidWorks");
-                    var found = System.IO.Directory.GetFiles(templatesDir, "*.drwdot",
-                        System.IO.SearchOption.AllDirectories);
-                    if (found.Length == 0)
-                        return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                            "TEMPLATE_NOT_FOUND",
-                            "No drawing template (.drwdot) found. Set a default drawing template in SolidWorks → Tools → Options → Default Templates.");
-                    templatePath = found[0];
-                }
+                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
+                        "TEMPLATE_NOT_FOUND",
+                        "No drawing template (.drwdot) found. Set a default drawing template in SolidWorks → Tools → Options → Default Templates.");
 
                 // Sheet paper + orientation (default A3 landscape, the size this tool always made).
                 // 'custom' is refused here: this tool has no width/height, and MapPaperSize would
@@ -131,29 +170,19 @@ namespace SolidworksExecution.Services
 
         public ExecutionResponse AddDrawingView(ToolRequest request)
         {
-            if (_guard.IsDuplicate(request.OperationId))
-                return _guard.GetDuplicate(request.OperationId);
-
-            if (!_guard.IsStateVersionValid(request.StateVersion))
-                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                    "INVALID_STATE_VERSION", "Incoming state_version does not match current state.");
-
-            if (!EnsureConnected())
-                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                    "COM_ATTACH_FAILED", "SolidWorks process not found or COM not registered.");
+            if (!ValidateStandardGuards(request, out var failed))
+                return failed;
 
             try
             {
                 var p = request.Params as JObject;
                 string viewType = (p?.Value<string>("view_type") ?? "front").ToLowerInvariant();
                 const double DefaultViewPosition = 0.1;
+                bool hasExplicitPos = p?["pos_x"] != null && p?["pos_y"] != null;
                 double posX = p?.Value<double?>("pos_x") ?? DefaultViewPosition;
                 double posY = p?.Value<double?>("pos_y") ?? DefaultViewPosition;
-                // (0.1, 0.1) is this tool's own default and means "choose a free spot": the adapter
-                // fills the documented defaults in, so an absent position is indistinguishable from
-                // that pair. Any other pair is an explicit request and is kept when it is legal.
-                bool autoPlace = Math.Abs(posX - DefaultViewPosition) < 1e-9 &&
-                                 Math.Abs(posY - DefaultViewPosition) < 1e-9;
+                // Auto-place only if caller did not supply explicit coordinates (or requested auto_place: true)
+                bool autoPlace = p?.Value<bool?>("auto_place") ?? !hasExplicitPos;
                 double scale = p?.Value<double?>("scale") ?? 1.0;
                 string modelPath = p?.Value<string>("model_path") ?? "";
                 string displayMode = (p?.Value<string>("display_mode") ?? "").Trim().ToLowerInvariant();
@@ -164,6 +193,25 @@ namespace SolidworksExecution.Services
                         "NO_ACTIVE_DOCUMENT", "No active drawing document found in SolidWorks.");
 
                 var drawingDoc = modelDoc as IDrawingDoc;
+                if (drawingDoc == null)
+                {
+                    object[] docs = _solidWorks.GetDocuments() as object[];
+                    if (docs != null)
+                    {
+                        foreach (var d in docs)
+                        {
+                            var dd = d as IDrawingDoc;
+                            if (dd != null)
+                            {
+                                drawingDoc = dd;
+                                modelDoc = (IModelDoc2)dd;
+                                int actErr = 0;
+                                try { _solidWorks.ActivateDoc3(modelDoc.GetTitle(), false, 0, ref actErr); } catch { }
+                                break;
+                            }
+                        }
+                    }
+                }
                 if (drawingDoc == null)
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                         "NOT_A_DRAWING", "Active document is not a drawing. Call create_drawing first.");
@@ -185,7 +233,7 @@ namespace SolidworksExecution.Services
                             $"view_type '{viewType}' is not supported. Supported: front, top, right, isometric, back, bottom, left.");
                 }
 
-                // If model_path not provided, attempt to use the first open part
+                // If model_path not provided, attempt to use the first open part or assembly
                 if (string.IsNullOrEmpty(modelPath))
                 {
                     object[] docs = _solidWorks.GetDocuments() as object[];
@@ -194,7 +242,7 @@ namespace SolidworksExecution.Services
                         foreach (var d in docs)
                         {
                             var md = d as IModelDoc2;
-                            if (md != null && md is IPartDoc)
+                            if (md != null && (md is IPartDoc || md is IAssemblyDoc))
                             {
                                 modelPath = md.GetPathName();
                                 break;
@@ -205,7 +253,7 @@ namespace SolidworksExecution.Services
 
                 if (string.IsNullOrEmpty(modelPath))
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                        "MODEL_NOT_FOUND", "model_path not provided and no open part document found. Provide model_path or open a part first.");
+                        "MODEL_NOT_FOUND", "model_path not provided and no open part or assembly document found. Provide model_path or open a part/assembly first.");
 
                 var view = drawingDoc.CreateDrawViewFromModelView3(modelPath, swViewName, posX, posY, 0.0) as IView;
                 if (view == null)
@@ -320,7 +368,7 @@ namespace SolidworksExecution.Services
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                         "NOT_A_DRAWING", "Active document is not a drawing. Call create_drawing first.");
 
-                // If model_path not provided, use the first open part
+                // If model_path not provided, use the first open part or assembly
                 if (string.IsNullOrEmpty(modelPath))
                 {
                     object[] docs = _solidWorks.GetDocuments() as object[];
@@ -329,7 +377,7 @@ namespace SolidworksExecution.Services
                         foreach (var d in docs)
                         {
                             var md = d as IModelDoc2;
-                            if (md != null && md is IPartDoc)
+                            if (md != null && (md is IPartDoc || md is IAssemblyDoc))
                             {
                                 modelPath = md.GetPathName();
                                 break;
@@ -340,7 +388,7 @@ namespace SolidworksExecution.Services
 
                 if (string.IsNullOrEmpty(modelPath))
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                        "MODEL_NOT_FOUND", "model_path not provided and no open part document found. Provide model_path or open a part first.");
+                        "MODEL_NOT_FOUND", "model_path not provided and no open part or assembly document found. Provide model_path or open a part or assembly first.");
 
                 // Resolve the configuration name (CreateFlatPatternViewFromModelView3 needs it).
                 // If not supplied, read the referenced part's ACTIVE configuration; fall back to "Default".
@@ -420,16 +468,8 @@ namespace SolidworksExecution.Services
 
         public ExecutionResponse AddDrawingDimension(ToolRequest request)
         {
-            if (_guard.IsDuplicate(request.OperationId))
-                return _guard.GetDuplicate(request.OperationId);
-
-            if (!_guard.IsStateVersionValid(request.StateVersion))
-                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                    "INVALID_STATE_VERSION", "Incoming state_version does not match current state.");
-
-            if (!EnsureConnected())
-                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                    "COM_ATTACH_FAILED", "SolidWorks process not found or COM not registered.");
+            if (!ValidateStandardGuards(request, out var failed))
+                return failed;
 
             try
             {
@@ -567,6 +607,17 @@ namespace SolidworksExecution.Services
                         try { next = v.GetNextView(); } catch { }
                         try
                         {
+                            var voArr = v.GetOutline() as double[];
+                            if (voArr != null && voArr.Length >= 4)
+                            {
+                                double pad = 0.08;
+                                if (px < voArr[0] - pad || px > voArr[2] + pad || py < voArr[1] - pad || py > voArr[3] + pad)
+                                {
+                                    vo = next;
+                                    continue;
+                                }
+                            }
+
                             double scale = 1.0; try { scale = v.ScaleDecimal; } catch { }
                             var pos = v.Position as double[];
                             if (scale > 0 && pos != null && pos.Length >= 2)
@@ -1163,7 +1214,6 @@ namespace SolidworksExecution.Services
                 if (includeGeometry)
                 {
                     try { modelDoc.ForceRebuild3(false); } catch { }
-                    try { modelDoc.EditRebuild3(); } catch { }
                     try { modelDoc.GraphicsRedraw2(); } catch { }
                     try { modelDoc.ViewZoomtofit2(); } catch { }
                 }
@@ -1247,7 +1297,9 @@ namespace SolidworksExecution.Services
                         if (sect != null) vj["section"] = sect;
                         viewsArr.Add(vj);
                     }
-                    viewObj = (view != null) ? view.GetNextView() : null;
+                    object next = (view != null) ? view.GetNextView() : null;
+                    ComScope.Release(view);
+                    viewObj = next;
                 }
 
                 root["view_count"] = viewsArr.Count;
@@ -1255,8 +1307,8 @@ namespace SolidworksExecution.Services
                 root["views"] = viewsArr;
                 if (includeRelations)
                 {
-                    // stations table DROPPED (2026-07-19 trim) — the benchmark data-consumption report
-                    // showed it unconsumed (the model cross-references views by dimension, not this table).
+                    var stations = ComputeStations(stationViews);
+                    if (stations != null) root["stations"] = stations;
                     if (relSkippedVids.Count > 0) root["relations_skipped_views"] = relSkippedVids;
                 }
 
@@ -1399,6 +1451,7 @@ namespace SolidworksExecution.Services
                 }
                 object next = null;
                 try { next = disp != null ? disp.GetNext5() : null; } catch { next = null; }
+                ComScope.Release(disp);
                 dispObj = next;
             }
             return arr;
@@ -2214,13 +2267,44 @@ namespace SolidworksExecution.Services
                 }
             }
 
-            // touches DROPPED (2026-07-19 trim) — the benchmark data-consumption report showed it
-            // fully redundant with `tangent` for corner/junction identification and otherwise unused.
+            // T-contact junctions between lines
+            var tContacts = new List<double[]>();
+            var tMembers = new List<List<string>>();
+            for (int li = 0; li < g.Lines.Count; li++)
+            {
+                var l1 = g.Lines[li];
+                for (int lj = 0; lj < g.Lines.Count; lj++)
+                {
+                    if (li == lj) continue;
+                    var l2 = g.Lines[lj];
+                    double t, fx, fy, pd;
+                    if (LinePerpFoot(l1.X1, l1.Y1, l2.X1, l2.Y1, l2.X2, l2.Y2, out t, out fx, out fy, out pd) && pd <= RelTol && t > 0.05 && t < 0.95)
+                    {
+                        AddTContact(tContacts, tMembers, fx, fy, pd, "l" + li, "l" + lj);
+                    }
+                }
+            }
+
             var rel = new JObject();
             if (concentric.Count > 0) rel["concentric"] = concentric;
             if (equalDia.Count > 0) rel["equal_diameter"] = equalDia;
             if (tangent.Count > 0) rel["tangent"] = tangent;
-            return rel.Count > 0 ? rel : null;   // empty buckets dropped
+            if (tContacts.Count > 0)
+            {
+                var tArray = new JArray();
+                for (int i = 0; i < tContacts.Count; i++)
+                {
+                    SortPrimitiveIds(tMembers[i]);
+                    tArray.Add(new JObject
+                    {
+                        ["members"] = new JArray(tMembers[i].ToArray()),
+                        ["at"] = new JArray { R6(tContacts[i][0]), R6(tContacts[i][1]) },
+                        ["residual"] = R6(tContacts[i][2])
+                    });
+                }
+                rel["t_contacts"] = tArray;
+            }
+            return rel.Count > 0 ? rel : null;
         }
 
         // Merge same-position T-contacts into one group record (position within RelTol).
@@ -2603,6 +2687,108 @@ namespace SolidworksExecution.Services
         // (ADR-018). Bumps state_version (the drawing gains annotations); echoes inserted_count in
         // result_geometry for in-band verification (ADR-023 spirit) so the caller can confirm dims landed
         // without a separate analyze_drawing round-trip.
+        // InsertModelAnnotations3 places every dimension where its SKETCH text sat, so at 1:4 the model
+        // set collapses into a few blobs (measured on Part2: 68 dims, three unreadable clusters). This
+        // pass only MOVES text: the value is read before and after the move and the move is reverted if
+        // it changed, because a dimension that silently re-attaches to another edge prints a wrong number.
+        private int DeclutterDimensions(IModelDoc2 modelDoc, IDrawingDoc drawingDoc)
+        {
+            double sheetW = 0.420, sheetH = 0.297;
+            try
+            {
+                var sv = drawingDoc.GetFirstView() as IView;
+                var so = sv == null ? null : sv.GetOutline() as double[];
+                if (so != null && so.Length >= 4) { sheetW = so[2] - so[0]; sheetH = so[3] - so[1]; }
+            }
+            catch { }
+
+            double[][] dirs =
+            {
+                new[] { 0.0, 0.0 }, new[] { 1.0, 0.0 }, new[] { -1.0, 0.0 },
+                new[] { 0.0, 1.0 }, new[] { 0.0, -1.0 },
+                new[] { 1.0, 1.0 }, new[] { -1.0, 1.0 }, new[] { 1.0, -1.0 }, new[] { -1.0, -1.0 }
+            };
+            double[] radii = { 0.0, 0.007, 0.014, 0.021, 0.028, 0.036, 0.045, 0.055 };
+            var placed = new List<double[]>();
+            int moved = 0;
+            object vo = drawingDoc.GetFirstView();
+            int guard = 0;
+            while (vo != null && guard++ < 500)
+            {
+                var v = vo as IView;
+                if (v == null) break;
+                object nextView = null;
+                try { nextView = v.GetNextView(); } catch { }
+                int vType = -1;
+                try { vType = v.Type; } catch { }
+                if (vType != 1)
+                {
+                    object dimObj = null;
+                    try { dimObj = v.GetFirstDisplayDimension5(); } catch { }
+                    int g = 0;
+                    while (dimObj != null && g++ < 300)
+                    {
+                        var dd = dimObj as IDisplayDimension;
+                        object nextDim = null;
+                        try { nextDim = dd.GetNext3(); } catch { }
+                        try
+                        {
+                            var sd = dd == null ? null : dd.GetDimension2(0) as IDimension;
+                            var ann = dd == null ? null : dd.GetAnnotation() as IAnnotation;
+                            var pos = ann == null ? null : ann.GetPosition() as double[];
+                            if (sd != null && ann != null && pos != null && pos.Length >= 2)
+                            {
+                                double x0 = pos[0], y0 = pos[1];
+                                double value0 = sd.SystemValue;
+                                string num = (value0 * 1000.0).ToString("0.##", CultureInfo.InvariantCulture);
+                                double half = 0.0012 + 0.0011 * num.Length;
+                                double[] pick = null;
+                                foreach (double r in radii)
+                                {
+                                    foreach (var d in dirs)
+                                    {
+                                        double cx = x0 + d[0] * r, cy = y0 + d[1] * r;
+                                        if (cx < 0.012 || cx > sheetW - 0.012 || cy < 0.012 || cy > sheetH - 0.012) continue;
+                                        bool clash = false;
+                                        foreach (var q in placed)
+                                            if (Math.Abs(q[0] - cx) < q[2] + half && Math.Abs(q[1] - cy) < 0.0049)
+                                            { clash = true; break; }
+                                        if (clash) continue;
+                                        pick = new[] { cx, cy };
+                                        break;
+                                    }
+                                    if (pick != null) break;
+                                }
+                                if (pick == null) { placed.Add(new[] { x0, y0, half }); }
+                                else
+                                {
+                                    if (Math.Abs(pick[0] - x0) > 1e-6 || Math.Abs(pick[1] - y0) > 1e-6)
+                                    {
+                                        ann.SetPosition(pick[0], pick[1], 0);
+                                        double after = 0.0;
+                                        try { after = sd.SystemValue; } catch { after = double.NaN; }
+                                        if (!double.IsNaN(after) && Math.Abs(after - value0) < 1e-9) moved++;
+                                        else
+                                        {
+                                            try { ann.SetPosition(x0, y0, 0); } catch { }
+                                            modelDoc.ClearSelection2(true);
+                                            ExecLog.Write($"model spread: move of '{num}' changed its value - reverted");
+                                        }
+                                    }
+                                    placed.Add(new[] { pick[0], pick[1], half });
+                                }
+                            }
+                        }
+                        catch (Exception ex) { ExecLog.Write("model spread: " + ex.Message); }
+                        dimObj = nextDim;
+                    }
+                }
+                vo = nextView;
+            }
+            modelDoc.GraphicsRedraw2();
+            return moved;
+        }
+
         public ExecutionResponse AutoDimensionDrawing(ToolRequest request)
         {
             if (_guard.IsDuplicate(request.OperationId))
@@ -2620,19 +2806,32 @@ namespace SolidworksExecution.Services
             {
                 var p = request.Params as JObject;
 
-                // mode="essentials" (default "model"): a CURATED, self-placed dimension set — overall
-                // envelope + hole callouts + hole positions from a baseline. It reads the projected
-                // geometry and inserts nothing from the model, because InsertModelAnnotations3 (the
-                // "model" route below) transfers every flagged model dimension (measured: 21-60 per
-                // view) and collides. See SolidWorksService.DrawingEssentials.cs for the full rationale
-                // and the verified sheet-coordinate model.
-                string mode = (p?.Value<string>("mode") ?? "model").Trim().ToLowerInvariant();
-                if (mode == "essentials")
-                    return AutoDimensionEssentials(request, p);
-                if (mode != "model")
+                // Two modes, named for what they produce rather than for where the data lives:
+                //   manufacturing    — the curated, printable set (envelope + callouts + hole chains).
+                //                      It reads each view's projected geometry and imports NOTHING from
+                //                      the model, so it can never reproduce the model's own pile-up.
+                //   raw_model_items  — SolidWorks 'Insert Model Items' verbatim: every driving model
+                //                      dimension, placed where the sketch had it. A reference set.
+                // Old names ('essentials', 'model') stay accepted so existing callers do not break.
+                string mode = (p?.Value<string>("mode") ?? "manufacturing").Trim().ToLowerInvariant();
+                bool baselineHoles = mode == "baseline_holes" || mode == "baseline-per-hole";
+                bool baselineXOnly = mode == "baseline_x" || mode == "baseline-x";
+                bool baseline = mode == "baseline" || mode == "manufacturing_baseline" || baselineHoles || baselineXOnly;
+                if (mode == "manufacturing" || mode == "center" || mode == "centre" ||
+                    mode == "manufacturing_print" || mode == "print" || mode == "essentials" || baseline)
+                {
+                    if (p == null) p = new JObject();
+                    p["baseline"] = baseline;
+                    p["baseline_holes"] = baselineHoles;
+                    p["baseline_x_only"] = baselineXOnly;
+                    return AutoDimension(request, p);
+                }
+                if (mode != "raw_model_items" && mode != "model_items" && mode != "model")
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                        "INVALID_PARAMETER", $"Unknown mode '{mode}'. Use 'model' (import the model's own " +
-                        "marked dimensions) or 'essentials' (curated envelope + hole callouts + hole positions).");
+                        "INVALID_PARAMETER", $"Unknown mode '{mode}'. Use 'manufacturing'/'center' (hole " +
+                        "centres chained hole-to-hole), 'baseline' (every hole measured from the same " +
+                        "reference edge, one Y per hole ROW), 'baseline_holes' (same, but one Y for EVERY " +
+                        "hole) or 'raw_model_items' (SolidWorks Insert Model Items, verbatim).");
 
                 bool allViews = p?.Value<bool?>("all_views") ?? true;
                 bool includeUnmarked = p?.Value<bool?>("include_unmarked") ?? false;
@@ -2669,8 +2868,9 @@ namespace SolidworksExecution.Services
                 var arr = inserted as object[];
                 if (arr != null) insertedCount = arr.Length;
 
+                int spread = DeclutterDimensions(modelDoc, drawingDoc);
                 ExecLog.Write($"auto_dimension_drawing: inserted {insertedCount} dimension(s) " +
-                    $"allViews={allViews} includeUnmarked={includeUnmarked} types={types}");
+                    $"allViews={allViews} includeUnmarked={includeUnmarked} types={types} spread={spread}");
 
                 var response = new ExecutionResponse
                 {
@@ -2754,40 +2954,20 @@ namespace SolidworksExecution.Services
 
                 int viewsProcessed = 0;
                 int viewsMarked = 0;
-                var modelViews = new List<IView>();
-                object viewObj = drawingDoc.GetFirstView(); // first view = the sheet
-                int guardCounter = 0;
-                while (viewObj != null && guardCounter++ < 2000)
+                var modelViews = GetAllDrawingViews(drawingDoc, includeSheetView: false);
+                foreach (var view in modelViews)
                 {
-                    var view = viewObj as IView;
-                    object next = (view != null) ? view.GetNextView() : null;
-                    if (view != null)
+                    bool ok = false;
+                    try { drawingDoc.ActivateView(view.Name); } catch { }
+                    try
                     {
-                        int vType = -1;
-                        try { vType = view.Type; } catch { } // swDrawingViewTypes_e: 1 = sheet
-                        if (vType != 1)
-                        {
-                            modelViews.Add(view);
-                            bool ok = false;
-                            // Many drawing annotation ops act on the ACTIVE view — activate it first.
-                            try { drawingDoc.ActivateView(view.Name); } catch { }
-                            try
-                            {
-                                // AutoInsertCenterMarks2(InsertType, InsertOption, LinearSlotCenter,
-                                //   ArcSlotCenter, UseDocumentDefaults, Size, Gap, ExtendedLines,
-                                //   CenterLineFont, Angle). UseDocumentDefaults=true → SW's own center-mark
-                                //   size/style (robust); the explicit args are then ignored by SW.
-                                ok = view.AutoInsertCenterMarks2(insertType, insertOption,
-                                    includeSlots, includeSlots, true, 0.0025, 0.0,
-                                    extendedLines, true, 0.0);
-                                viewsProcessed++;
-                            }
-                            catch (Exception exv) { ExecLog.Write($"auto_center_marks: view '{view.Name}' threw {exv.Message}"); }
-                            if (ok) viewsMarked++;
-                            ExecLog.Write($"auto_center_marks: view '{view.Name}' type={vType} ok={ok}");
-                        }
+                        ok = view.AutoInsertCenterMarks2(insertType, insertOption,
+                            includeSlots, includeSlots, false, 0.0025, 0.0,
+                            extendedLines, true, 0.0);
+                        viewsProcessed++;
                     }
-                    viewObj = next;
+                    catch (Exception exv) { ExecLog.Write($"auto_center_marks: view '{view.Name}' threw {exv.Message}"); }
+                    if (ok) viewsMarked++;
                 }
 
                 // Commit so the inserted center marks/centerlines are realized (and so the per-view
@@ -3097,7 +3277,7 @@ namespace SolidworksExecution.Services
                     sel = modelDoc.Extension.SelectByID2("", "EDGE", selX, selY, 0, false, 0, null, 0); selType = "EDGE";
                     if (!sel) { sel = modelDoc.Extension.SelectByID2("", "SILHOUETTE", selX, selY, 0, false, 0, null, 0); selType = "SILHOUETTE"; }
                     if (!sel) { sel = modelDoc.Extension.SelectByID2("", "SKETCHSEGMENT", selX, selY, 0, false, 0, null, 0); selType = "SKETCHSEGMENT"; }
-                    ExecLog.Write($"add_section_view: EDGE at ({selX},{selY}) selected={sel}");
+                    ExecLog.Write($"add_section_view: {selType} at ({selX},{selY}) selected={sel}");
                     if (!sel)
                         return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                             "EDGE_NOT_FOUND", $"No projected straight edge/line found at or near ({selX}, {selY}). Point at an edge already shown in a view, or use x1,y1,x2,y2 to draw a cut line through the feature.");

@@ -2,7 +2,7 @@
 
 This is the separability boundary (IR-ADR-003): the compiler depends on this small interface,
 never on the adapter, the MCP SDK, or httpx. A concrete implementation lives OUTSIDE pycompiler
-(today: adapters/claude/ir_execution_port.py, which delegates to the existing execution_client
+(today: adapters/ir_execution_port.py, which delegates to the existing execution_client
 over plain REST). Moving the compiler into a standalone REST service later is just a different
 ExecutionPort behind the same calls — the lowering / resolver / validation logic is untouched.
 """

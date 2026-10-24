@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -66,6 +67,26 @@ namespace SolidworksExecution.Services
             public double[] XDir, YDir;       // the owning view's frame axes (view-plane classification)
         }
 
+        // Pick budgets (see PickAt). A search that cannot find its entity must fail FAST: on a healthy
+        // view this tool never needs more than ~8 selects, so 18 is generous, and 6 s is the worst case
+        // per call. After 8 failed picks in one view the remaining annotations are skipped outright —
+        // that is the difference between a 60 s run and a run that looks hung.
+        private const int MaxPickAttempts = 18;
+        private const long PickTimeBudgetMs = 6000;
+        private const int MaxPickFailuresPerView = 8;
+        // Whole-run ceiling. A healthy Part2 run spends 0 failed picks and 4 capped ones, so 24 is far
+        // beyond normal work; it exists only so a broken coordinate set can cost at most 24 x 6 s of
+        // searching before the pass stops picking and reports the remaining annotations as skipped.
+        private const int MaxPickFailuresPerRun = 24;
+
+        internal sealed class EssentialsContext
+        {
+            public int PickFailsInView;
+            public int PickFailsInRun;
+            public bool BaselineHoles;
+            public bool BaselineXOnly;
+        }
+
         private sealed class PickInfo
         {
             public string Text = "none";
@@ -74,7 +95,7 @@ namespace SolidworksExecution.Services
         }
 
         // ---------------------------------------------------------------- public entry (mode dispatch)
-        internal ExecutionResponse AutoDimensionEssentials(ToolRequest request, JObject p)
+        internal ExecutionResponse AutoDimension(ToolRequest request, JObject p)
         {
             if (_guard.IsDuplicate(request.OperationId))
                 return _guard.GetDuplicate(request.OperationId);
@@ -97,11 +118,23 @@ namespace SolidworksExecution.Services
                 return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                     "NOT_A_DRAWING", "Active document is not a drawing. Use create_drawing + add_drawing_view first.");
 
+            ApplyAnnotationFonts(modelDoc);
+
             double gap = p?.Value<double?>("gap") ?? 0.012;                 // metres between dimension rows
             bool callouts = p?.Value<bool?>("include_callouts") ?? true;
             bool holePos = p?.Value<bool?>("include_hole_positions") ?? true;
             bool circleDiams = p?.Value<bool?>("include_circle_diameters") ?? true;
             bool clearExisting = p?.Value<bool?>("clear_existing") ?? false;
+            bool baseline = p?.Value<bool?>("baseline") ?? false;
+            var ctx = new EssentialsContext
+            {
+                BaselineHoles = p?.Value<bool?>("baseline_holes") ?? false,
+                BaselineXOnly = p?.Value<bool?>("baseline_x_only") ?? false
+            };
+            // Baseline means PER HOLE: a Y with no X above it is not a usable coordinate, so unless the
+            // caller asks for the row-compressed form, every hole that carries an X also carries a Y.
+            if (baseline && !ctx.BaselineXOnly && (p?.Value<bool?>("baseline_rows") ?? false) == false)
+                ctx.BaselineHoles = true;
             bool centerGroup = p?.Value<bool?>("center_group") ?? true;
             double viewGap = p?.Value<double?>("view_gap") ?? 0.050;
 
@@ -138,10 +171,19 @@ namespace SolidworksExecution.Services
                 // every re-run forces a brand-new drawing document (the measured 14-document mess).
                 if (clearExisting) RemoveSheetDisplayDimensions(drawingDoc, modelDoc, skipped);
 
+                // LAYER, DON'T REPLACE. A sheet that already carries dimensions — the hand-tuned
+                // AutoGridCutter_part2_center sheet is one — must gain only the measurements it is
+                // missing. Seeding the claim map with what is already printed makes every later pass
+                // refuse to draw a second copy of a value that is on the paper (measured: a plain
+                // re-run put a second 813.00 / 700.00 / 63.30 on top of the existing ones).
+                SeedSeenFromSheet(drawingDoc, seen);
+
                 // The whole view group is centred on the paper, with the title-block corner kept
                 // free, BEFORE any dimension is placed: annotations are then laid out against the
-                // final view positions instead of positions that move afterwards.
-                if (centerGroup) CenterViewGroup(drawingDoc, viewGap);
+                // final view positions instead of positions that move afterwards. A sheet that already
+                // carries dimensions is left exactly where it is — moving it would drag a finished
+                // layout out from under the numbers that were placed against it.
+                if (centerGroup && seen.Count == 0) CenterViewGroup(drawingDoc, viewGap);
 
                 object viewObj = drawingDoc.GetFirstView();
                 int guard = 0;
@@ -204,9 +246,20 @@ namespace SolidworksExecution.Services
                 {
                     ViewGeomData gv;
                     geomOf.TryGetValue(v.Name, out gv);
-                    bool ownsHoles = holePos && holeView != null && v.Name == holeView;
-                    total += EssentialsForView(modelDoc, drawingDoc, v, gap, callouts, circleDiams,
-                        ownsHoles, gv, sheetRect, seen, created, skipped);
+                    // BASELINE style reads every view against ITS OWN datum edge, so a hole that exists
+                    // only in a side view is dimensioned THERE (from that view's own left/bottom edge)
+                    // instead of being dropped because some other view won the hole-ownership vote.
+                    // Cross-view duplicates are stopped by the sheet claim map inside the pass.
+                    bool ownsHoles = holePos && gv != null && gv.Circles.Count > 0 &&
+                                     (baseline || (holeView != null && v.Name == holeView));
+
+                    // The ENVELOPE goes on a view that carries no hole chain. Sharing one view with the
+                    // chain put 813.00 on the part outline and stacked the chain rows on the envelope row
+                    // (measured 2026-10-21): a hole view's rows are already two-to-four deep. With a single
+                    // orthographic view there is nowhere else to put it, so it stays there.
+                    bool envelopeHere = !ownsHoles || ortho.Count < 2;
+                    total += EssentialsForView(ctx, modelDoc, drawingDoc, v, gap, callouts, circleDiams,
+                        ownsHoles, gv, sheetRect, seen, created, skipped, envelopeHere, baseline);
                 }
             }
             finally
@@ -218,6 +271,50 @@ namespace SolidworksExecution.Services
                 }
                 catch { }
             }
+
+            // FINAL AUDIT: a dimension that was created but is no longer on the sheet is a number the
+            // client never sees. The old code reported it as ok and the loss went unnoticed until the
+            // PDF was read back (measured: 813.00 created, then deleted by a neighbour's rollback).
+            var liveNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                object avo = drawingDoc.GetFirstView();
+                int ag = 0;
+                while (avo != null && ag++ < 500)
+                {
+                    var av = avo as IView;
+                    if (av == null) break;
+                    object nextA = null;
+                    try { nextA = av.GetNextView(); } catch { }
+                    object adim = null;
+                    try { adim = av.GetFirstDisplayDimension5(); } catch { }
+                    int g3 = 0;
+                    while (adim != null && g3++ < 2000)
+                    {
+                        var add = adim as IDisplayDimension;
+                        object nd2 = null;
+                        try { nd2 = add.GetNext3(); } catch { }
+                        try
+                        {
+                            var sdd = add.GetDimension2(0) as IDimension;
+                            if (sdd != null && !string.IsNullOrEmpty(sdd.FullName)) liveNames.Add(sdd.FullName);
+                        }
+                        catch { }
+                        adim = nd2;
+                    }
+                    avo = nextA;
+                }
+            }
+            catch { }
+            int vanished = 0;
+            foreach (var rec in created.OfType<JObject>())
+            {
+                string nm = rec.Value<string>("name");
+                if (string.IsNullOrEmpty(nm)) continue;
+                if (!liveNames.Contains(nm)) { rec["vanished"] = true; vanished++; }
+            }
+            ExecLog.Write($"essentials AUDIT: sheet holds {liveNames.Count} dimension(s), " +
+                $"{created.Count} created, {vanished} vanished");
 
             // Leave the sheet FITTED: annotation picking/creation can leave the graphics view zoomed onto
             // the last dimension, and every preview/render (PNG export) would then show that corner
@@ -261,16 +358,75 @@ namespace SolidworksExecution.Services
             return response;
         }
 
+        // Every dimension already printed on the active sheet, keyed the same way Claim() keys them and
+        // owned by a name no view can have ("<sheet>"), so any attempt to draw the same measurement again
+        // is refused instead of layered on top.
+        private void SeedSeenFromSheet(IDrawingDoc drawingDoc, Dictionary<long, string> seen)
+        {
+            int seeded = 0;
+            try
+            {
+                object vo = drawingDoc.GetFirstView();
+                int guard = 0;
+                while (vo != null && guard++ < 500)
+                {
+                    var v = vo as IView;
+                    if (v == null) break;
+                    object next = null;
+                    try { next = v.GetNextView(); } catch { }
+                    object dim = null;
+                    try { dim = v.GetFirstDisplayDimension5(); } catch { }
+                    int g2 = 0;
+                    while (dim != null && g2++ < 2000)
+                    {
+                        var dd = dim as IDisplayDimension;
+                        object nd = null;
+                        try { nd = dd.GetNext3(); } catch { }
+                        try
+                        {
+                            var sd = dd.GetDimension2(0) as IDimension;
+                            if (sd != null)
+                            {
+                                double mm = sd.SystemValue * 1000.0;
+                                bool dia = false;
+                                try { dia = dd.GetType() == (int)swDimensionType_e.swDiameterDimension; }
+                                catch { }
+                                seen[Bucket(mm, dia)] = "<sheet>";
+                                if (!dia)
+                                {
+                                    seen[Bucket(mm, true)] = "<sheet>";
+                                    seeded++;
+                                }
+                            }
+                        }
+                        catch { }
+                        dim = nd;
+                    }
+                    vo = next;
+                }
+            }
+            catch (Exception ex)
+            {
+                ExecLog.Write("essentials: seed from sheet failed — " + ex.Message);
+            }
+            ExecLog.Write($"essentials: {seeded} dimension value(s) already on the sheet are protected");
+        }
+
         // ---------------------------------------------------------------- one-measurement-once
         // 0.1 mm buckets: the envelope measured on two views differs in the last decimals (14.009 vs
-        // 14.029 mm) and must still count as the same measurement.
-        private static long Bucket(double mm) { return (long)Math.Round(mm * 10.0); }
+        // 14.029 mm) and must still count as the same measurement. Snap to a micron first: 17.749999
+        // and 17.75 are the same measurement but land on opposite sides of the 0.1 mm bucket edge
+        // (measured: a second "2xØ17.75" callout was printed on a sheet that already had one).
+        private static long Bucket(double mm)
+        {
+            return (long)Math.Round(Math.Round(mm, 3) * 10.0, MidpointRounding.AwayFromZero);
+        }
 
         private const long DiametricKeyOffset = 1000000000L;
 
         private static long Bucket(double mm, bool diametric)
         {
-            return (long)Math.Round(mm * 10.0) + (diametric ? DiametricKeyOffset : 0L);
+            return Bucket(mm) + (diametric ? DiametricKeyOffset : 0L);
         }
 
         private static bool Claim(Dictionary<long, string> seen, double mm, string viewName, bool diametric = false)
@@ -291,9 +447,10 @@ namespace SolidworksExecution.Services
 
         // Create one curated dimension unless the same measurement was already dimensioned on ANOTHER
         // view of this sheet, in which case it is reported in skipped[] and nothing is drawn.
-        private bool AddCuratedDim(IModelDoc2 modelDoc, Dictionary<long, string> seen, string viewName,
+        private bool AddCuratedDim(EssentialsContext ctx, IModelDoc2 modelDoc, Dictionary<long, string> seen, string viewName,
             EntityPick from, EntityPick to, double tx, double ty, JArray created, JArray skipped,
-            string kind, double expectedMm, bool selfFallback = false, EntityPick selfPick = null)
+            string kind, double expectedMm, bool selfFallback = false, EntityPick selfPick = null,
+            bool vertical = false)
         {
             if (!Claim(seen, expectedMm, viewName))
             {
@@ -301,9 +458,9 @@ namespace SolidworksExecution.Services
                     " mm is already dimensioned on another view of this sheet");
                 return false;
             }
-            if (AddLinearDim(modelDoc, from, to, tx, ty, created, kind, expectedMm)) return true;
+            if (AddLinearDim(ctx, modelDoc, from, to, tx, ty, created, kind, expectedMm, vertical)) return true;
             if (selfFallback && selfPick != null &&
-                AddSelfDim(modelDoc, selfPick, tx, ty, created, kind + " (self)", expectedMm))
+                AddSelfDim(ctx, modelDoc, selfPick, tx, ty, created, kind + " (self)", expectedMm))
                 return true;
             Release(seen, expectedMm, viewName);
             return false;
@@ -313,7 +470,7 @@ namespace SolidworksExecution.Services
         // outline of a turned part's groove neck, has no vertices at its ends at all — still dimensions
         // as its OWN length, which is exactly the extent the caller wants. Same gate as every other
         // dimension: the value is read back from SolidWorks and a dimension that disagrees is deleted.
-        private bool AddSelfDim(IModelDoc2 modelDoc, EntityPick pick, double tx, double ty,
+        private bool AddSelfDim(EssentialsContext ctx, IModelDoc2 modelDoc, EntityPick pick, double tx, double ty,
             JArray created, string tag, double expectedMm)
         {
             var rec = new JObject
@@ -326,28 +483,30 @@ namespace SolidworksExecution.Services
             {
                 modelDoc.ClearSelection2(true);
                 double[] hit;
-                if (!PickAt(modelDoc, pick, false, tag, out hit))
+                if (!PickAt(ctx, modelDoc, pick, false, tag, out hit))
                 {
                     rec["ok"] = false; rec["why"] = "no pick reached an edge for a self dimension";
                     created.Add(rec); return false;
                 }
                 var d = modelDoc.AddDimension2(tx, ty, 0) as IDisplayDimension;
                 double? v = null;
+                string nm = null;
                 try
                 {
                     var sd = d == null ? null : d.GetDimension2(0) as IDimension;
-                    if (sd != null) v = sd.SystemValue * 1000.0;
+                    if (sd != null) { v = sd.SystemValue * 1000.0; nm = sd.FullName; }
                 }
                 catch { }
                 if (d != null && v != null && Math.Abs(v.Value - expectedMm) < 0.05)
                 {
                     rec["ok"] = true;
                     rec["value_mm"] = R6(v.Value);
+                    rec["name"] = nm ?? "";
                     rec["text_at_mm"] = new JArray(R6(tx * 1000.0), R6(ty * 1000.0));
                     created.Add(rec);
                     return true;
                 }
-                if (d != null) DeleteDimensionAt(modelDoc, tx, ty);
+                if (d != null) DeleteDisplayDim(modelDoc, d, nm, tx, ty);
                 rec["ok"] = false;
                 rec["why"] = v == null
                     ? "self dimension value unreadable — removed"
@@ -408,12 +567,13 @@ namespace SolidworksExecution.Services
         }
 
         // ---------------------------------------------------------------- per-view essentials
-        private int EssentialsForView(IModelDoc2 modelDoc, IDrawingDoc drawingDoc, IView view, double gap,
+        private int EssentialsForView(EssentialsContext ctx, IModelDoc2 modelDoc, IDrawingDoc drawingDoc, IView view, double gap,
             bool callouts, bool circleDiams, bool ownsHoles, ViewGeomData g, double[] sheet,
-            Dictionary<long, string> seen, JArray created, JArray skipped)
+            Dictionary<long, string> seen, JArray created, JArray skipped, bool envelopeHere, bool baseline)
         {
             int made = 0;
             if (g == null) { skipped.Add(view.Name + "|no geometry"); return 0; }
+            ctx.PickFailsInView = 0;
 
             double scale = 1.0; try { scale = view.ScaleDecimal; } catch { }
             var pos = view.Position as double[];
@@ -483,7 +643,6 @@ namespace SolidworksExecution.Services
             holeY.Sort();
 
             double stack = Math.Max(0.006, Math.Min(gap, 0.009));   // pitch between stacked dimensions
-            double minText = 0.015;                                 // "406.00" at 3.5 mm text + air
 
             // HALF SPLIT (client rule, 2026-10-20): a plate is read as two halves — the X dimensions of
             // the holes in the UPPER half of the view go ABOVE it, the ones in the LOWER half go BELOW,
@@ -567,6 +726,17 @@ namespace SolidworksExecution.Services
             double vColX = leftSide ? sMinX - vPitch * (colsY + 1) : sMaxX + vPitch * (colsY + 1);
             double hPitch = below ? hPitchBelow : hPitchAbove;
             double hSign = below ? -1.0 : 1.0;
+
+            // ONE ROW PER PASS. Two passes that draw horizontally on the same row print one number on
+            // top of the other (measured on the A3 sheet: 151.00 and 68.00 landed on the same point in
+            // the right view) and a failing attempt's cleanup then deletes the neighbour it lands on
+            // (measured: 813.00 was created, then vanished when 'inner offset (lines)' was rolled back).
+            // Rows are numbered outward from the envelope row and clamped inside the paper.
+            Func<int, double> passRowY = (int k) =>
+            {
+                double v = hRowY + hSign * hPitch * k;
+                return Math.Max(0.014, Math.Min(sheetH - 0.014, v));
+            };
             Func<int, double> holeRowY = (int i) => holeUp[i]
                 ? sMaxY + hPitchAbove * (rowsAbove - hRowOf[i])
                 : sMinY - hPitchBelow * (rowsBelow - hRowOf[i]);
@@ -593,10 +763,12 @@ namespace SolidworksExecution.Services
             // envelope) corner-to-corner between the extreme VERTICES. A rounded end has no vertical edge
             // at the extreme — measured on Part2, whose extreme vertical edges are 700 apart while the part
             // is 813 long — and a wrong pair is caught by the value readback instead of being printed.
+            if (envelopeHere && !baseline)
+            {
             double[] wCentre = S((pMinX + pMaxX) / 2.0, pMinY);
             bool wOk = false;
             if (verts.Count >= 2)
-                wOk = AddCuratedDim(modelDoc, seen, view.Name,
+                wOk = AddCuratedDim(ctx, modelDoc, seen, view.Name,
                     LinePick(verts.First(), "vline", S, fxAx, fyAx),
                     LinePick(verts.Last(), "vline", S, fxAx, fyAx),
                     wCentre[0], hRowY, created, skipped,
@@ -613,11 +785,51 @@ namespace SolidworksExecution.Services
                     allVerts.OrderBy(p => p[0]).First(),
                     allVerts.OrderByDescending(p => p[0]).First()
                 };
-                wOk = AddCuratedDim(modelDoc, seen, view.Name,
+                wOk = AddCuratedDim(ctx, modelDoc, seen, view.Name,
                     VertexPick(wpair[0], S, fxAx, fyAx),
                     VertexPick(wpair[1], S, fxAx, fyAx),
                     wCentre[0], hRowY, created, skipped,
                     view.Name + "|overall width (corners)", (pMaxX - pMinX) * 1000.0);
+            }
+            if (!wOk)
+            {
+                // The envelope of a part whose ends are rounded by R2 has no vertical edge at the extreme
+                // X, so every pair above measures the flat body instead. SolidWorks still answers the
+                // question with whatever it draws at the extreme: pick that EDGE on the mid-height line
+                // and let the value readback decide. Part2 answers 813.0 - the same total the profile
+                // chain reaches (700 body + 56.5 + 56.5).
+                double midY = (pMinY + pMaxY) / 2.0;
+                var lp = new EntityPick
+                {
+                    Expect = "any", ExpectR = 0.0, XDir = fxAx, YDir = fyAx,
+                    Points = new[] { S(pMinX, midY) }
+                };
+                var rp = new EntityPick
+                {
+                    Expect = "any", ExpectR = 0.0, XDir = fxAx, YDir = fyAx,
+                    Points = new[] { S(pMaxX, midY) }
+                };
+                double expW = (pMaxX - pMinX) * 1000.0;
+                if (!Claim(seen, expW, view.Name))
+                {
+                    skipped.Add(view.Name + "|overall width (extreme edges)|" +
+                        expW.ToString("0.##", CultureInfo.InvariantCulture) +
+                        " mm is already dimensioned on another view of this sheet");
+                }
+                else
+                {
+                    // Same row as the body width, so the line sits just clear of it (4.5 mm) and the text
+                    // starts at the left fifth instead of the centre: the body width already owns the
+                    // centre and the two numbers were printing on top of each other.
+                    // The fallback needs a ROW OF ITS OWN: sharing hRowY with the corner-to-corner pass
+                    // printed 813.00 on top of the part outline (measured on the 2026-10-21 A4 rebuild).
+                    // One pitch further out keeps both the line and the text clear of the body.
+                    double wRowY = passRowY(0);
+                    double tx813 = S(pMinX + (pMaxX - pMinX) * 0.22, midY)[0];
+                    wOk = AddLinearDim(ctx, modelDoc, lp, rp, tx813, wRowY, created,
+                        view.Name + "|overall width (extreme edges)", expW);
+                    if (!wOk) Release(seen, expW, view.Name);
+                }
             }
             if (wOk) made++;
             else if (verts.Count < 2 && allVerts.Count < 2)
@@ -627,7 +839,7 @@ namespace SolidworksExecution.Services
             double[] hCentre = S(pMinX, (pMinY + pMaxY) / 2.0);
             bool hOk = false;
             if (hors.Count >= 2)
-                hOk = AddCuratedDim(modelDoc, seen, view.Name,
+                hOk = AddCuratedDim(ctx, modelDoc, seen, view.Name,
                     LinePick(hors.First(), "hline", S, fxAx, fyAx),
                     LinePick(hors.Last(), "hline", S, fxAx, fyAx),
                     vColX, hCentre[1], created, skipped,
@@ -639,7 +851,7 @@ namespace SolidworksExecution.Services
                     allVerts.OrderBy(p => p[1]).First(),
                     allVerts.OrderByDescending(p => p[1]).First()
                 };
-                hOk = AddCuratedDim(modelDoc, seen, view.Name,
+                hOk = AddCuratedDim(ctx, modelDoc, seen, view.Name,
                     VertexPick(hpair[0], S, fxAx, fyAx),
                     VertexPick(hpair[1], S, fxAx, fyAx),
                     vColX, hCentre[1], created, skipped,
@@ -648,6 +860,9 @@ namespace SolidworksExecution.Services
             if (hOk) made++;
             else if (hors.Count < 2 && allVerts.Count < 2)
                 skipped.Add(view.Name + "|no edge and no vertex for overall height");
+            }
+            else
+                skipped.Add(view.Name + "|envelope|printed on the view without a hole chain");
 
             // ---- 3. hole callouts, one per DISTINCT diameter, on the HOLE-OWNING view only (see above):
             // a neighbouring view projects the same holes as plain lines, and its only circles are corner
@@ -662,7 +877,7 @@ namespace SolidworksExecution.Services
             var usedY = new List<double>();
             var annotatedD = new List<double>();     // diameters already dimensioned in THIS view, mm
 
-            if (callouts && ownsHoles && g.Circles.Count > 0)
+            if (callouts && ownsHoles && g.Circles.Count > 0 && !baseline)
             {
                 var diameters = new List<double>();
                 foreach (var c in g.Circles.OrderByDescending(c => c.R))
@@ -700,9 +915,9 @@ namespace SolidworksExecution.Services
                             " already called out on another view of this sheet");
                         continue;
                     }
-                    if (AddEssentialsHoleCallout(modelDoc, drawingDoc,
+                    if (AddEssentialsHoleCallout(ctx, modelDoc, drawingDoc,
                             CirclePick(c, S, fxAx, fyAx), cTextX, cTextY, created, tag, turnedProfile,
-                            view, c))
+                            view, c, n > 1 ? n + "x@" : null))
                     {
                         made++;
                         annotatedD.Add(dMm);
@@ -718,7 +933,7 @@ namespace SolidworksExecution.Services
             // does it: pick the arc by its RADIUS, add a DIAMETER dimension, read the value back from the
             // geometry and DELETE it unless it matches. No caller value is ever written on this path, so it
             // can only print a true number.
-            if (circleDiams && g.Circles.Count > 0)
+            if (circleDiams && g.Circles.Count > 0 && !baseline)
             {
                 var diam = new List<double>();
                 foreach (var c in g.Circles.OrderByDescending(c => c.R))
@@ -761,9 +976,9 @@ namespace SolidworksExecution.Services
                     double cTextY = S(c.CX, c.CY)[1];
                     while (usedY.Any(v => Math.Abs(v - cTextY) < 0.007)) cTextY += 0.007;
                     usedY.Add(cTextY);
-                    if (AddEssentialsHoleCallout(modelDoc, drawingDoc,
+                    if (AddEssentialsHoleCallout(ctx, modelDoc, drawingDoc,
                             CirclePick(c, S, fxAx, fyAx), cTextX, cTextY, created, tag, true,
-                            view, c))
+                            view, c, same.Count > 1 ? same.Count + "x@" : null))
                     {
                         made++;
                         annotatedD.Add(dMm);
@@ -787,6 +1002,22 @@ namespace SolidworksExecution.Services
                     .Select(gr => gr.OrderBy(k => k.CX).ToList())
                     .OrderByDescending(gr => gr[0].CY)
                     .ToList();
+                // BASELINE ladder: ten distances measured from ONE edge would print as ten parallel
+                // lines on a single row. The client's own baseline sheet splits them into TWO ladders
+                // — the shorter spans below the view, the longer ones above — each stepped outward so
+                // no two labels share a height. Same split here, so the sheet reads like theirs.
+                var baseLadder = new Dictionary<double, double>();
+                if (baseline)
+                {
+                    var led = g.Circles.Select(k => Math.Round(k.CX, 5)).Distinct()
+                        .Select(x => new { X = x, E = Math.Abs(x - vBase.X1) * 1000.0 })
+                        .OrderBy(a => a.E).ToList();
+                    int half = ctx.BaselineHoles ? 0 : (led.Count + 1) / 2;
+                    for (int i = 0; i < led.Count; i++)
+                        baseLadder[led[i].X] = i < half
+                            ? sMinY - hPitchBelow * (2 + i)
+                            : sMaxY + hPitchAbove * (2 + (i - half));
+                }
                 int rowIdx = 0;
                 foreach (var row in rowsC)
                 {
@@ -794,12 +1025,55 @@ namespace SolidworksExecution.Services
                     double rowY = up
                         ? sMaxY + hPitchAbove * (2 + rowIdx % 3)
                         : sMinY - hPitchBelow * (2 + rowIdx % 3);
+
+                    // BASELINE style (the client's AutoGridCutter_part2_baseline sheet): every hole is
+                    // measured from the SAME reference edge, so the machinist reads 20 / 105 / 185 / 230
+                    // straight off one ladder and can check each hole on its own.
+                    if (baseline)
+                    {
+                        for (int i = 0; i < row.Count; i++)
+                        {
+                            var c = row[i];
+                            double exp = Math.Abs(c.CX - vBase.X1) * 1000.0;
+                            double[] mid = S((vBase.X1 + c.CX) / 2.0, c.CY);
+                            double ty = baseLadder[Math.Round(c.CX, 5)];
+                            string tag = view.Name + "|baseline X " + (c.CX * 1000.0)
+                                .ToString("0.00", CultureInfo.InvariantCulture);
+                            // Baseline style measures EVERY hole from the same edge, so two holes that
+                            // sit in the same column (the two Ø12.5 at ±120) produce the same distance.
+                            // The client's sheet prints 230 / 470 ONCE: keep one, skip the repeat. Claim()
+                            // cannot do this on its own — it deliberately allows a repeat inside one view
+                            // because a chain (20 / 85 / 80 / 330 / 80 / 85) must print its values twice.
+                            if (seen.ContainsKey(Bucket(exp)) || chainSeen.ContainsKey(Bucket(exp)))
+                            {
+                                skipped.Add(tag + "|" + exp.ToString("0.##", CultureInfo.InvariantCulture) +
+                                    " mm is already on this sheet");
+                                continue;
+                            }
+                            if (AddCuratedDim(ctx, modelDoc, chainSeen, view.Name,
+                                    LinePick(vBase, "vline", S, fxAx, fyAx),
+                                    CirclePick(c, S, fxAx, fyAx),
+                                    mid[0], ty, created, skipped, tag, exp))
+                            {
+                                made++;
+                                seen[Bucket(exp)] = view.Name;   // one distance per SHEET, not per view
+                            }
+                        }
+                        rowIdx++;
+                        continue;
+                    }
+
                     bool equalPair = row.Count == 2 && Math.Abs(row[0].R - row[1].R) < 1e-6;
                     if (equalPair)
                     {
                         double exp = Math.Abs(row[1].CX - row[0].CX) * 1000.0;
                         double[] mid = S((row[0].CX + row[1].CX) / 2.0, row[0].CY);
-                        if (AddCuratedDim(modelDoc, chainSeen, view.Name,
+                        if (seen.ContainsKey(Bucket(exp)))
+                        {
+                            skipped.Add(view.Name + "|chain pair|" + exp.ToString("0.##", CultureInfo.InvariantCulture) +
+                                " mm is already on this sheet");
+                        }
+                        else if (AddCuratedDim(ctx, modelDoc, chainSeen, view.Name,
                                 CirclePick(row[0], S, fxAx, fyAx), CirclePick(row[1], S, fxAx, fyAx),
                                 mid[0], rowY, created, skipped, view.Name + "|chain pair", exp))
                             made++;
@@ -815,11 +1089,19 @@ namespace SolidworksExecution.Services
                                 : CirclePick(row[i - 1], S, fxAx, fyAx);
                             double exp = Math.Abs(c.CX - fromX) * 1000.0;
                             double[] mid = S((fromX + c.CX) / 2.0, c.CY);
+                            double ty = exp < 120.0
+                                ? rowY + (up ? 1.0 : -1.0) * hPitchAbove * 1.3 * (i % 3)
+                                : rowY;
                             string tag = view.Name + "|chain X " + (c.CX * 1000.0)
                                 .ToString("0.00", CultureInfo.InvariantCulture);
-                            if (AddCuratedDim(modelDoc, chainSeen, view.Name, fromPick,
+                            if (seen.ContainsKey(Bucket(exp)))
+                            {
+                                skipped.Add(tag + "|" + exp.ToString("0.##", CultureInfo.InvariantCulture) +
+                                    " mm is already on this sheet");
+                            }
+                            else if (AddCuratedDim(ctx, modelDoc, chainSeen, view.Name, fromPick,
                                     CirclePick(c, S, fxAx, fyAx),
-                                    mid[0], rowY, created, skipped, tag, exp))
+                                    mid[0], ty, created, skipped, tag, exp))
                                 made++;
                         }
                     }
@@ -829,31 +1111,101 @@ namespace SolidworksExecution.Services
 
             // ---- 5. Y positions, CHAIN style: bottom edge -> lowest hole, then hole to hole upward.
             // Same fresh claim map as X: 10 and 30 legitimately repeat in the vertical chain.
-            if (ownsHoles && hBase != null && holeY.Count > 0)
+            if (ownsHoles && hBase != null && holeY.Count > 0 && !ctx.BaselineXOnly)
             {
                 var chainSeenY = new Dictionary<long, string>();
+
+                // METHOD A — one Y for EVERY hole, drawn at that hole's own X from the bottom edge.
+                // The row values repeat (six holes share 75.5), and that is the point: the machinist
+                // never has to work out which row a hole belongs to, the number sits under the hole.
+                if (ctx.BaselineHoles)
+                {
+                    var done = new List<string>();
+                    // Two holes can share one X column (Part2 has two Ø12.5 in the ±120 columns). Their
+                    // vertical labels would land on the same page x and print on top of each other, so
+                    // each column spreads its own labels sideways.
+                    var colsH = g.Circles.GroupBy(k => Math.Round(k.CX, 5))
+                        .ToDictionary(gr => gr.Key, gr => gr.OrderBy(k => k.CY).ToList());
+                    foreach (var c in g.Circles.OrderBy(k => k.CX).ThenBy(k => k.CY))
+                    {
+                        string key = Math.Round(c.CX, 4) + "/" + Math.Round(c.CY, 4);
+                        if (done.Contains(key)) continue;
+                        done.Add(key);
+                        double expY = Math.Abs(c.CY - hBase.Y1) * 1000.0;
+                        double[] at = S(c.CX, c.CY);
+                        var colH = colsH[Math.Round(c.CX, 5)];
+                        int ci = colH.FindIndex(k => Math.Abs(k.CY - c.CY) < 1e-6);
+                        double dx = colH.Count > 1 ? (ci - (colH.Count - 1) / 2.0) * 0.008 : 0.0;
+                        string tag = view.Name + "|hole Y " + (c.CX * 1000.0).ToString("0.00", CultureInfo.InvariantCulture);
+                        if (AddCuratedDim(ctx, modelDoc, chainSeenY, view.Name,
+                                LinePick(hBase, "hline", S, fxAx, fyAx),
+                                CirclePick(c, S, fxAx, fyAx),
+                                at[0] + dx, sMinY - hPitchBelow * 1.6,
+                                created, skipped, tag, expY, vertical: true))
+                            made++;
+                    }
+                    goto afterY;
+                }
+
+                // A vertical dimension's text is ROTATED on the sheet: "35.50" is ~15 mm long up the page.
+                // Hole rows 10 mm apart in the part (35.5 / 45.5) therefore print their labels 10 * scale
+                // mm apart — 1.5 mm at 1:6.7 — and the two texts land on top of each other whatever the
+                // scale (measured on the 2026-10-21 A4 rebuild). Spread the labels along the page in the
+                // chain's own order, then slide the whole ladder back inside the sheet.
+                const double yTextPitch = 0.013;
+                var yLabelY = new double[holeY.Count];
+                for (int i = 0; i < holeY.Count; i++) yLabelY[i] = vMidY[i];
+                for (int i = 1; i < yLabelY.Length; i++)
+                    if (yLabelY[i] - yLabelY[i - 1] < yTextPitch)
+                        yLabelY[i] = yLabelY[i - 1] + yTextPitch;
+                double yOverflow = yLabelY[yLabelY.Length - 1] - (sheetH - 0.016);
+                if (yOverflow > 0)
+                    for (int i = 0; i < yLabelY.Length; i++) yLabelY[i] -= yOverflow;
+                for (int i = 0; i < yLabelY.Length; i++)
+                    yLabelY[i] = Math.Max(0.016, yLabelY[i]);
+
                 for (int i = 0; i < holeY.Count; i++)
                 {
                     double y = holeY[i];
                     var c = g.Circles.First(k => Math.Abs(k.CY - y) < 1e-5);
-                    double fromY = i == 0 ? hBase.Y1 : holeY[i - 1];
-                    EntityPick fromPick = i == 0
+                    double fromY = baseline ? hBase.Y1 : (i == 0 ? hBase.Y1 : holeY[i - 1]);
+                    EntityPick fromPick = (baseline || i == 0)
                         ? LinePick(hBase, "hline", S, fxAx, fyAx)
                         : CirclePick(g.Circles.First(k => Math.Abs(k.CY - fromY) < 1e-5), S, fxAx, fyAx);
                     string tag = view.Name + "|chain Y " + (y * 1000.0)
                         .ToString("0.00", CultureInfo.InvariantCulture);
-                    if (AddCuratedDim(modelDoc, chainSeenY, view.Name, fromPick,
+                    double tx = leftSide
+                        ? sMinX - vPitch * (colsY - yColOf[i])
+                        : sMaxX + vPitch * (colsY - yColOf[i]);
+                    double tyChain = yLabelY[i];
+                    double expY = Math.Abs(y - fromY) * 1000.0;
+                    // Vertical distances get their OWN namespace: an X of 68 and a Y of 68 are two
+                    // different measurements and must not cancel each other.
+                    long yKey = 500000000L + Bucket(expY);
+                    bool dupY = seen.ContainsKey(yKey) || (!baseline && seen.ContainsKey(Bucket(expY)));
+                    if (dupY)
+                    {
+                        skipped.Add(tag + "|" + expY.ToString("0.##", CultureInfo.InvariantCulture) +
+                            " mm is already on this sheet");
+                        continue;
+                    }
+                    if (AddCuratedDim(ctx, modelDoc, chainSeenY, view.Name, fromPick,
                             CirclePick(c, S, fxAx, fyAx),
-                            (leftSide ? sMinX - vPitch * (colsY - yColOf[i])
-                                      : sMaxX + vPitch * (colsY - yColOf[i])), vMidY[i], created, skipped, tag,
-                            Math.Abs(y - fromY) * 1000.0))
+                            tx, tyChain, created, skipped, tag,
+                            expY, vertical: true))
+                    {
                         made++;
+                        seen[yKey] = view.Name;
+                    }
                 }
             }
+            afterY:
 
             // ---- 6. inner chain: a view that produced nothing still has inner edges to dimension
-            // (offset from envelope, span between inner lines, extent of those lines).
-            if (made == 0)
+            // (offset from envelope, span between inner lines, extent of those lines). A PROFILE view
+            // (no holes of its own) runs it even when it already printed its height: on Part2 the front
+            // view got its 63.3 and then stopped, so its two ribs and their offsets never appeared.
+            if (!baseline && (made == 0 || !ownsHoles))
             {
                 var innerX = new List<double>();
                 foreach (var l in g.Lines)
@@ -879,16 +1231,16 @@ namespace SolidworksExecution.Services
                     double b0 = Math.Max(l0.Y1, l0.Y2), b1 = Math.Max(l1.Y1, l1.Y2);
                     bool atBottom = Math.Abs(a0 - a1) <= Math.Abs(b0 - b1);
                     double y0 = atBottom ? a0 : b0, y1 = atBottom ? a1 : b1;
-                    bool spanOk = Math.Abs(y0 - y1) < 1e-4 && AddCuratedDim(modelDoc, seen, view.Name,
+                    bool spanOk = Math.Abs(y0 - y1) < 1e-4 && AddCuratedDim(ctx, modelDoc, seen, view.Name,
                             VertexPick(new[] { x0, y0 }, S, fxAx, fyAx),
                             VertexPick(new[] { x1, y1 }, S, fxAx, fyAx),
-                            S((x0 + x1) / 2.0, pMinY)[0], hRowY, created, skipped,
+                            S((x0 + x1) / 2.0, pMinY)[0], passRowY(1), created, skipped,
                             view.Name + "|inner span", (x1 - x0) * 1000.0);
                     if (!spanOk)
-                        spanOk = AddCuratedDim(modelDoc, seen, view.Name,
+                        spanOk = AddCuratedDim(ctx, modelDoc, seen, view.Name,
                             LinePick(l0, "vline", S, fxAx, fyAx),
                             LinePick(l1, "vline", S, fxAx, fyAx),
-                            S((x0 + x1) / 2.0, pMinY)[0], hRowY, created, skipped,
+                            S((x0 + x1) / 2.0, pMinY)[0], passRowY(1), created, skipped,
                             view.Name + "|inner span (lines)", (x1 - x0) * 1000.0);
                     if (spanOk) made++;
                 }
@@ -911,18 +1263,18 @@ namespace SolidworksExecution.Services
                             double d = Math.Abs(iv[i][1] - ev[k][1]);
                             if (d < best) { best = d; bi = i; bj = k; }
                         }
-                    bool offOk = off > 1e-4 && best < 1e-3 && AddCuratedDim(modelDoc, seen, view.Name,
+                    bool offOk = off > 1e-4 && best < 1e-3 && AddCuratedDim(ctx, modelDoc, seen, view.Name,
                             VertexPick(iv[bi], S, fxAx, fyAx),
                             VertexPick(ev[bj], S, fxAx, fyAx),
                             S(useLeft ? (pMinX + x0) / 2.0 : (x1 + pMaxX) / 2.0, pMinY)[0],
-                            hRowY + hSign * hPitch, created, skipped,
+                            passRowY(3), created, skipped,
                             view.Name + "|inner offset", off * 1000.0);
                     if (!offOk && off > 1e-4)
-                        offOk = AddCuratedDim(modelDoc, seen, view.Name,
+                        offOk = AddCuratedDim(ctx, modelDoc, seen, view.Name,
                             LinePick(edge, "vline", S, fxAx, fyAx),
                             LinePick(inner, "vline", S, fxAx, fyAx),
                             S(useLeft ? (pMinX + x0) / 2.0 : (x1 + pMaxX) / 2.0, pMinY)[0],
-                            hRowY + hSign * hPitch, created, skipped,
+                            passRowY(3), created, skipped,
                             view.Name + "|inner offset (lines)", off * 1000.0);
                     if (offOk) made++;
                 }
@@ -931,13 +1283,68 @@ namespace SolidworksExecution.Services
                 {
                     var longest = innerLines.OrderByDescending(k => Math.Abs(k.Y2 - k.Y1)).First();
                     double ext = Math.Abs(longest.Y2 - longest.Y1) * 1000.0;
-                    if (ext > 1e-4 && AddCuratedDim(modelDoc, seen, view.Name,
+
+                    // An inner edge that spans the whole view IS the overall height measured a second
+                    // time: Part2's front view printed 63.30 twice, exactly on top of itself (measured
+                    // 2026-10-21). Claim() lets a view repeat its own value for the chain passes, so this
+                    // one has to be filtered here.
+                    if (Math.Abs(ext - (pMaxY - pMinY) * 1000.0) < 0.05)
+                        skipped.Add(view.Name + "|inner extent|" + ext.ToString("0.##", CultureInfo.InvariantCulture) +
+                            " mm is the view's own overall height — not repeated");
+                    else if (ext > 1e-4 && AddCuratedDim(ctx, modelDoc, seen, view.Name,
                             VertexPick(new[] { longest.X1, longest.Y1 }, S, fxAx, fyAx),
                             VertexPick(new[] { longest.X2, longest.Y2 }, S, fxAx, fyAx),
                             vColX, S(longest.X1, (longest.Y1 + longest.Y2) / 2.0)[1], created, skipped,
                             view.Name + "|inner extent", ext,
                             selfFallback: true,
                             selfPick: LinePick(longest, "vline", S, fxAx, fyAx)))
+                        made++;
+                }
+            }
+
+            // ---- 7. PROFILE STEP CHAIN: a view with no holes is read as a series of step positions, the
+            // same way a hole view is read as a hole chain. The envelope passes print only the extremes,
+            // so on Part2's front view the ribs at +-246.5 / +-303 / +-350 never reached the sheet.
+            if (!baseline && !ownsHoles && g.Circles.Count == 0)
+            {
+                var stepX = new List<double>();
+                foreach (var l in g.Lines)
+                {
+                    if (Math.Abs(l.X1 - l.X2) > 1e-6) continue;
+                    if (Math.Abs(l.Y2 - l.Y1) < 1e-6) continue;
+                    if (!stepX.Any(x => Math.Abs(x - l.X1) < 1e-6)) stepX.Add(l.X1);
+                }
+                stepX.Sort();
+                double chainY = passRowY(2);
+                var rowEnds = new List<double>();
+
+                for (int i = 1; i < stepX.Count; i++)
+                {
+                    double exp = (stepX[i] - stepX[i - 1]) * 1000.0;
+                    if (exp < 0.5) continue;
+
+                    var la = g.Lines.Where(l => Math.Abs(l.X1 - l.X2) < 1e-6
+                            && Math.Abs(l.X1 - stepX[i - 1]) < 1e-6)
+                        .OrderByDescending(l => Math.Abs(l.Y2 - l.Y1)).FirstOrDefault();
+                    var lb = g.Lines.Where(l => Math.Abs(l.X1 - l.X2) < 1e-6
+                            && Math.Abs(l.X1 - stepX[i]) < 1e-6)
+                        .OrderByDescending(l => Math.Abs(l.Y2 - l.Y1)).FirstOrDefault();
+                    if (la == null || lb == null) continue;
+
+                    double[] midPt = S((stepX[i - 1] + stepX[i]) / 2.0, pMinY);
+                    int rIdx = PackRow(rowEnds, midPt[0], 0.025);
+                    double ty = chainY + (rIdx * 0.006) + (exp < 120.0 ? (i % 2 == 0 ? 0.0042 : -0.0042) : 0.0);
+                    string tag = view.Name + "|profile step " +
+                        exp.ToString("0.00", CultureInfo.InvariantCulture);
+                    if (seen.ContainsKey(Bucket(exp)))
+                    {
+                        skipped.Add(tag + "|" + exp.ToString("0.##", CultureInfo.InvariantCulture) +
+                            " mm is already on this sheet");
+                        continue;
+                    }
+                    if (AddLinearDim(ctx, modelDoc, LinePick(la, "vline", S, fxAx, fyAx),
+                            LinePick(lb, "vline", S, fxAx, fyAx), midPt[0], ty,
+                            created, tag, exp))
                         made++;
                 }
             }
@@ -1038,8 +1445,8 @@ namespace SolidworksExecution.Services
         // from the same view and are VERIFIED; the text point is where SolidWorks puts the dimension
         // line. The created value is read back; a disagreeing value means a pick probed onto the wrong
         // entity, so the dimension is deleted instead of left to print a wrong number.
-        private bool AddLinearDim(IModelDoc2 modelDoc, EntityPick a, EntityPick b,
-            double tx, double ty, JArray created, string tag, double expectedMm)
+        private bool AddLinearDim(EssentialsContext ctx, IModelDoc2 modelDoc, EntityPick a, EntityPick b,
+            double tx, double ty, JArray created, string tag, double expectedMm, bool vertical = false)
         {
             var rec = new JObject
             {
@@ -1065,6 +1472,7 @@ namespace SolidworksExecution.Services
                 // repair turned EVERY dimension on the sheet into a single-entity one).
                 IDisplayDimension dim = null;
                 double? got = null;
+                string dimName = null;
                 for (int attempt = 0; attempt < 2; attempt++)
                 {
                     EntityPick p1 = (attempt == 0) ? a : b;
@@ -1072,16 +1480,19 @@ namespace SolidworksExecution.Services
                     string ord = (attempt == 0) ? "#1/#2" : "#2/#1";
                     modelDoc.ClearSelection2(true);
                     double[] h1;
-                    if (!PickAt(modelDoc, p1, false, tag + " " + ord + " first", out h1)) continue;
+                    if (!PickAt(ctx, modelDoc, p1, false, tag + " " + ord + " first", out h1)) continue;
                     double[] h2;
-                    if (!PickAt(modelDoc, p2, true, tag + " " + ord + " second", out h2)) continue;
-                    var d = modelDoc.AddDimension2(tx, ty, 0) as IDisplayDimension;
+                    if (!PickAt(ctx, modelDoc, p2, true, tag + " " + ord + " second", out h2)) continue;
+                    var d = (vertical
+                        ? modelDoc.AddVerticalDimension2(tx, ty, 0)
+                        : modelDoc.AddDimension2(tx, ty, 0)) as IDisplayDimension;
                     if (d == null) continue;
                     double? v = null;
+                    string nm = null;
                     try
                     {
                         var sd = d.GetDimension2(0) as IDimension;
-                        if (sd != null) v = sd.SystemValue * 1000.0;
+                        if (sd != null) { v = sd.SystemValue * 1000.0; nm = sd.FullName; }
                     }
                     catch { }
                     if (v == null)
@@ -1090,13 +1501,13 @@ namespace SolidworksExecution.Services
                         // goes, even if its geometry may be right. Imperfection is acceptable, a wrong
                         // number on a client sheet is not.
                         ExecLog.Write($"essentials retry [{tag}] attempt {attempt + 1} ({ord}) value unreadable - dimension removed");
-                        DeleteDimensionAt(modelDoc, tx, ty);
+                        DeleteDisplayDim(modelDoc, d, nm, tx, ty);
                         continue;
                     }
-                    if (Math.Abs(v.Value - expectedMm) < 0.05) { dim = d; got = v; break; }
+                    if (Math.Abs(v.Value - expectedMm) < 0.05) { dim = d; got = v; dimName = nm; break; }
                     ExecLog.Write($"essentials retry [{tag}] attempt {attempt + 1} ({ord}) produced " +
                         $"{v.Value:0.####} mm, expected {expectedMm:0.####} mm - dimension removed");
-                    DeleteDimensionAt(modelDoc, tx, ty);
+                    DeleteDisplayDim(modelDoc, d, nm, tx, ty);
                 }
                 if (dim == null)
                 {
@@ -1105,6 +1516,7 @@ namespace SolidworksExecution.Services
                     created.Add(rec); return false;
                 }
                 rec["value_mm"] = R6(got.Value);
+                rec["name"] = dimName ?? "";
                 rec["match"] = true;
                 rec["ok"] = true;
                 created.Add(rec);
@@ -1117,9 +1529,10 @@ namespace SolidworksExecution.Services
             }
         }
 
-        private bool AddEssentialsHoleCallout(IModelDoc2 modelDoc, IDrawingDoc drawingDoc,
+        private bool AddEssentialsHoleCallout(EssentialsContext ctx, IModelDoc2 modelDoc, IDrawingDoc drawingDoc,
             EntityPick pick, double textX, double textY, JArray created, string tag,
-            bool forceDiameter = false, IView view = null, CircleRec circle = null)
+            bool forceDiameter = false, IView view = null, CircleRec circle = null,
+            string prefix = null)
         {
             var rec = new JObject { ["kind"] = tag };
             try
@@ -1132,7 +1545,7 @@ namespace SolidworksExecution.Services
                     if (view != null && circle != null && TrySelectCircleEntity(modelDoc, view, circle))
                         return true;
                     double[] hh;
-                    return PickAt(modelDoc, pick, false, tg, out hh);
+                    return PickAt(ctx, modelDoc, pick, false, tg, out hh);
                 };
 
                 if (!selectCircle(tag))
@@ -1142,13 +1555,14 @@ namespace SolidworksExecution.Services
                 }
                 // The circular edge stays SELECTED; (textX,textY) is where the callout TEXT is written, so
                 // it is placed clear of the view outline instead of on top of its own hole.
-                object co = forceDiameter ? null : drawingDoc.AddHoleCallout2(textX, textY, 0.0);
+                object co = (forceDiameter || prefix != null) ? null : drawingDoc.AddHoleCallout2(textX, textY, 0.0);
                 double? coVal = null;
+                string coName = null;
                 try
                 {
                     var cd = co as IDisplayDimension;
                     var sd = cd == null ? null : cd.GetDimension2(0) as IDimension;
-                    if (sd != null) coVal = sd.SystemValue * 1000.0;
+                    if (sd != null) { coVal = sd.SystemValue * 1000.0; coName = sd.FullName; }
                 }
                 catch { }
                 double want = pick.ExpectR * 2000.0;      // the diameter the extracted circle has
@@ -1156,6 +1570,7 @@ namespace SolidworksExecution.Services
                 {
                     rec["ok"] = true;
                     rec["value_mm"] = R6(coVal.Value);
+                    rec["name"] = coName ?? "";
                     rec["text_at_mm"] = new JArray(R6(textX * 1000.0), R6(textY * 1000.0));
                     created.Add(rec);
                     return true;
@@ -1167,7 +1582,7 @@ namespace SolidworksExecution.Services
                     ExecLog.Write($"essentials callout [{tag}] " + (coVal == null
                         ? "value unreadable" : $"printed {coVal.Value:0.##} mm") +
                         $", expected Ø{want:0.##} - replaced by a diameter dimension");
-                if (co != null) DeleteDimensionAt(modelDoc, textX, textY);
+                if (co != null) DeleteDisplayDim(modelDoc, co as IDisplayDimension, coName, textX, textY);
                 if (!forceDiameter)
                 {
                     if (!selectCircle(tag + " diameter"))
@@ -1178,21 +1593,24 @@ namespace SolidworksExecution.Services
                 }
                 var ddim = modelDoc.AddDimension2(textX, textY, 0) as IDisplayDimension;
                 double? dv = null;
+                string ddName = null;
                 try
                 {
                     var sd = ddim == null ? null : ddim.GetDimension2(0) as IDimension;
-                    if (sd != null) dv = sd.SystemValue * 1000.0;
+                    if (sd != null) { dv = sd.SystemValue * 1000.0; ddName = sd.FullName; }
                 }
                 catch { }
                 if (ddim != null && dv != null && Math.Abs(dv.Value - want) < 0.05)
                 {
+                    ApplyGroupPrefix(ddim, prefix, rec);
                     rec["ok"] = true;
                     rec["value_mm"] = R6(dv.Value);
+                    rec["name"] = ddName ?? "";
                     rec["text_at_mm"] = new JArray(R6(textX * 1000.0), R6(textY * 1000.0));
                     created.Add(rec);
                     return true;
                 }
-                if (ddim != null) DeleteDimensionAt(modelDoc, textX, textY);
+                if (ddim != null) DeleteDisplayDim(modelDoc, ddim, ddName, textX, textY);
                 rec["ok"] = false;
                 rec["why"] = "no verifiable diameter annotation (wanted Ø" +
                     want.ToString("0.##", CultureInfo.InvariantCulture) + ")";
@@ -1203,6 +1621,54 @@ namespace SolidworksExecution.Services
             {
                 rec["ok"] = false; rec["why"] = ex.Message;
                 created.Add(rec); return false;
+            }
+        }
+
+        private static void ApplyGroupPrefix(IDisplayDimension dd, string prefix, JObject rec)
+        {
+            if (dd == null || string.IsNullOrEmpty(prefix)) return;
+            try
+            {
+                dd.SetText(1, prefix);
+                rec["prefix"] = prefix;
+                rec["prefix_readback"] = dd.GetText(1);
+            }
+            catch (Exception ex)
+            {
+                rec["prefix_error"] = ex.Message;
+            }
+        }
+
+        // Delete the exact display dimension that was just created, by NAME (Dimension.FullName), then
+        // prove it is gone. The old coordinate probe could select a NEIGHBOUR: rolling back a wrong
+        // 63.30 on the A3 essentials sheet deleted 813.00 instead and left the wrong number on paper.
+        private static void DeleteDisplayDim(IModelDoc2 modelDoc, IDisplayDimension d, string name,
+            double tx, double ty)
+        {
+            try
+            {
+                modelDoc.ClearSelection2(true);
+                bool sel = !string.IsNullOrEmpty(name) &&
+                    modelDoc.Extension.SelectByID2(name, "DIMENSION", 0, 0, 0, false, 0, null, 0);
+                if (!sel)
+                    sel = modelDoc.Extension.SelectByID2("", "DIMENSION", tx, ty, 0, false, 0, null, 0);
+                if (!sel)
+                {
+                    ExecLog.Write($"essentials delete [{name ?? "?"}] nothing selectable at " +
+                        $"({tx * 1000.0:0.#},{ty * 1000.0:0.#}) mm");
+                    return;
+                }
+                modelDoc.EditDelete();
+                modelDoc.ClearSelection2(true);
+                bool still = !string.IsNullOrEmpty(name) &&
+                    modelDoc.Extension.SelectByID2(name, "DIMENSION", 0, 0, 0, false, 0, null, 0);
+                modelDoc.ClearSelection2(true);
+                ExecLog.Write($"essentials delete [{name ?? "?"}] " +
+                    (still ? "FAILED - the wrong dimension is still on the sheet" : "verified gone"));
+            }
+            catch (Exception ex)
+            {
+                ExecLog.Write("essentials delete failed: " + ex.Message);
             }
         }
 
@@ -1217,11 +1683,37 @@ namespace SolidworksExecution.Services
             catch { }
         }
 
-        // Try every candidate point (with a small positional micro-probe around each), VERIFY the entity
-        // is the one asked for, and roll a rejected probe back (keeping any earlier valid selection).
         private bool PickAt(IModelDoc2 modelDoc, EntityPick pick, bool append, string tag, out double[] hit)
         {
+            return PickAt(new EssentialsContext(), modelDoc, pick, append, tag, out hit);
+        }
+
+        // Try every candidate point (with a small positional micro-probe around each), VERIFY the entity
+        // is the one asked for, and roll a rejected probe back (keeping any earlier valid selection).
+        private bool PickAt(EssentialsContext ctx, IModelDoc2 modelDoc, EntityPick pick, bool append, string tag, out double[] hit)
+        {
             hit = null;
+            if (ctx == null) ctx = new EssentialsContext();
+            // HARD BUDGET. A pick is a 60-step search (points x radii x directions x select types), and
+            // each step costs a COM round trip. When the geometry moved underneath us (measured: a 0.3 mm
+            // bbox shift turned every circle pick into a miss) the search burned minutes per callout and
+            // the whole run looked hung. Two limits stop that: selects per call, and wall clock per call.
+            // A view that keeps failing also gives up, so the pass finishes instead of re-searching every
+            // remaining annotation at the same wrong coordinate.
+            if (ctx.PickFailsInView >= MaxPickFailuresPerView)
+            {
+                ExecLog.Write($"essentials pick SKIPPED [{tag}] view pick budget exhausted " +
+                    $"({ctx.PickFailsInView} failed picks on this view)");
+                return false;
+            }
+            if (ctx.PickFailsInRun >= MaxPickFailuresPerRun)
+            {
+                ExecLog.Write($"essentials pick SKIPPED [{tag}] run pick budget exhausted " +
+                    $"({ctx.PickFailsInRun} failed picks in this pass)");
+                return false;
+            }
+            var sw = Stopwatch.StartNew();
+            int attempts = 0;
             double[] radii = { 0.0, 0.0003 };
             double[][] dirs =
             {
@@ -1239,8 +1731,19 @@ namespace SolidworksExecution.Services
             foreach (var p in pick.Points)
                 foreach (var r in radii)
                     foreach (var d in dirs)
+                    {
+                        if (r == 0.0 && (d[0] != 0.0 || d[1] != 0.0)) continue;
                         foreach (var t in types)
                         {
+                            if (attempts >= MaxPickAttempts || sw.ElapsedMilliseconds > PickTimeBudgetMs)
+                            {
+                                ExecLog.Write($"essentials pick CAPPED [{tag}] {attempts} select(s), " +
+                                    $"{sw.ElapsedMilliseconds} ms - search abandoned");
+                                ctx.PickFailsInView++;
+                                ctx.PickFailsInRun++;
+                                return false;
+                            }
+                            attempts++;
                             double px = p[0] + r * d[0], py = p[1] + r * d[1];
                             string whats;
                             if (!SelectOne(modelDoc, t, px, py, append, out whats))
@@ -1257,12 +1760,14 @@ namespace SolidworksExecution.Services
                             {
                                 ExecLog.Write($"essentials pick OK [{tag}] {info.Text} [{t}]");
                                 hit = new[] { px, py };
+                                ctx.PickFailsInView = 0;
                                 return true;
                             }
                             ExecLog.Write($"essentials pick WRONG [{tag}] {info.Text} [{t}] " +
                                 $"at ({px * 1000:0.##},{py * 1000:0.##}) wanted {pick.Expect}" + whats);
                             DeselectLast(modelDoc, append);
                         }
+                    }
 
             // Corner fallback: on some views the extreme boundary edge cannot be picked as an edge at
             // all — the hit test keeps resolving to the perpendicular edge — but its corner VERTEX can.
@@ -1270,8 +1775,19 @@ namespace SolidworksExecution.Services
                 foreach (var p in pick.VertexPoints)
                     foreach (var r in radii)
                         foreach (var d in dirs)
+                        {
+                            if (r == 0.0 && (d[0] != 0.0 || d[1] != 0.0)) continue;
                             foreach (var vt in new[] { "VERTEX", "SKETCHPOINT", "EXTSKETCHPOINT" })
                             {
+                                if (attempts >= MaxPickAttempts || sw.ElapsedMilliseconds > PickTimeBudgetMs)
+                                {
+                                    ExecLog.Write($"essentials pick CAPPED [{tag}] {attempts} select(s), " +
+                                        $"{sw.ElapsedMilliseconds} ms (corner fallback) - search abandoned");
+                                    ctx.PickFailsInView++;
+                                    ctx.PickFailsInRun++;
+                                    return false;
+                                }
+                                attempts++;
                                 double px = p[0] + r * d[0], py = p[1] + r * d[1];
                                 if (!SelectOne(modelDoc, vt, px, py, append, out _)) continue;
                                 var vinfo = DescribePickedEdge(modelDoc, pick.XDir, pick.YDir);
@@ -1280,13 +1796,18 @@ namespace SolidworksExecution.Services
                                     ExecLog.Write($"essentials pick OK [{tag}] {vinfo.Text} " +
                                         $"at ({px * 1000:0.##},{py * 1000:0.##}) [{vt}]");
                                     hit = new[] { px, py };
+                                    ctx.PickFailsInView = 0;
                                     return true;
                                 }
                                 DeselectLast(modelDoc, append);
                             }
+                        }
 
             ExecLog.Write($"essentials pick FAILED [{tag}] wanted {pick.Expect} at " +
-                $"({pick.Points[0][0] * 1000:0.##},{pick.Points[0][1] * 1000:0.##})");
+                $"({pick.Points[0][0] * 1000:0.##},{pick.Points[0][1] * 1000:0.##}) " +
+                $"after {attempts} select(s), {sw.ElapsedMilliseconds} ms");
+            ctx.PickFailsInView++;
+            ctx.PickFailsInRun++;
             return false;
         }
 

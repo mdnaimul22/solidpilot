@@ -783,10 +783,14 @@ namespace SolidworksExecution.Services
                     while (sub != null && subGuard++ < 2000)
                     {
                         if (sub.GetSpecificFeature2() is IMate2) last = sub.Name;
-                        sub = sub.GetNextSubFeature() as IFeature;
+                        var nextSub = sub.GetNextSubFeature() as IFeature;
+                        ComScope.Release(sub);
+                        sub = nextSub;
                     }
                 }
-                feat = feat.GetNextFeature() as IFeature;
+                var nextFeat = feat.GetNextFeature() as IFeature;
+                ComScope.Release(feat);
+                feat = nextFeat;
             }
             return last;
         }

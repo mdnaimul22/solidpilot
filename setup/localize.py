@@ -12,7 +12,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 EXE = REPO / "execution/solidworks/SolidworksExecution/bin/Debug/SolidworksExecution.exe"
 PROG = REPO / "execution/solidworks/SolidworksExecution/Program.cs"
-ENV = REPO / "adapters/claude/.env"
+ENV = REPO / "adapters/.env"
 
 OLD, NEW = "http://localhost:5000/", "http://localhost:5050/"
 

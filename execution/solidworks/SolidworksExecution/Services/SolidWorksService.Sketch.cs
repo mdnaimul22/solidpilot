@@ -435,6 +435,7 @@ namespace SolidworksExecution.Services
 
                 int done = 0;
                 var counts = new Dictionary<string, int>();
+                var createdSegments = new List<ISketchSegment>();
                 // ONE AddToDB bracket around the whole batch (ADR-042 — frozen-exact coordinates, no
                 // pixel-tolerance snapping) and ONE redraw at the end, instead of per segment.
                 bool prevAddToDb = modelDoc.SketchManager.AddToDB;
@@ -446,9 +447,12 @@ namespace SolidworksExecution.Services
                         var sp = segsTok[i] as JObject;
                         string et = sp?.Value<string>("entity_type");
                         if (sp == null || string.IsNullOrEmpty(et))
+                        {
+                            RollbackSegments(modelDoc, createdSegments);
                             return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                                 "MISSING_PARAMETER",
-                                $"segments[{i}] must be an object with entity_type. {done} segment(s) before it were created and remain in the sketch.");
+                                $"segments[{i}] must be an object with entity_type. {done} previous segment(s) were rolled back.");
+                        }
 
                         ISketchSegment seg; object[] segs;
                         string err = CreateSketchEntityCore(modelDoc, sp, et, sketchName, out seg, out segs);
@@ -458,9 +462,20 @@ namespace SolidworksExecution.Services
                             string code = parts[0];
                             string msg = parts.Length > 1 ? parts[1] : err;
                             ExecLog.Write($"add_sketch_entities: FAILED at segments[{i}] ({et}) after {done} created — {code}");
+                            RollbackSegments(modelDoc, createdSegments);
                             return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), code,
-                                $"segments[{i}] ({et}): {msg} {done} segment(s) before it were created and remain in the sketch.");
+                                $"segments[{i}] ({et}): {msg}. {done} previous segment(s) were rolled back cleanly.");
                         }
+
+                        if (seg != null) createdSegments.Add(seg);
+                        if (segs != null)
+                        {
+                            foreach (var s in segs)
+                            {
+                                if (s is ISketchSegment ss) createdSegments.Add(ss);
+                            }
+                        }
+
                         done++;
                         string key = et.ToLowerInvariant();
                         counts[key] = counts.TryGetValue(key, out var c) ? c + 1 : 1;
@@ -511,6 +526,25 @@ namespace SolidworksExecution.Services
             {
                 return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                     "UNEXPECTED_ERROR", ex.Message);
+            }
+        }
+
+        private void RollbackSegments(IModelDoc2 modelDoc, List<ISketchSegment> segments)
+        {
+            if (segments == null || segments.Count == 0 || modelDoc == null) return;
+            try
+            {
+                modelDoc.ClearSelection2(true);
+                foreach (var seg in segments)
+                {
+                    try { seg.Select4(true, null); } catch { }
+                }
+                modelDoc.EditDelete();
+                ExecLog.Write($"RollbackSegments: successfully removed {segments.Count} partial segments.");
+            }
+            catch (Exception ex)
+            {
+                ExecLog.Write($"RollbackSegments failed: {ex.Message}");
             }
         }
 

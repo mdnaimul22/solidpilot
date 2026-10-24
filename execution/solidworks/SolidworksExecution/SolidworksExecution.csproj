@@ -82,19 +82,32 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Controllers\ToolController.cs" />
+    <Compile Include="Infrastructure\ComScope.cs" />
     <Compile Include="Infrastructure\ExecLog.cs" />
     <Compile Include="Infrastructure\IOperationGuard.cs" />
+    <Compile Include="Infrastructure\IToolHandler.cs" />
+    <Compile Include="Infrastructure\MessageFilter.cs" />
     <Compile Include="Infrastructure\OperationGuard.cs" />
+    <Compile Include="Infrastructure\ProcessRecycler.cs" />
     <Compile Include="Infrastructure\StaExecutor.cs" />
+    <Compile Include="Infrastructure\ToolRegistry.cs" />
     <Compile Include="Models\CadState.cs" />
     <Compile Include="Models\ExecutionResponse.cs" />
     <Compile Include="Models\ToolRequest.cs" />
     <Compile Include="Program.cs" />
+    <Compile Include="Services\Interfaces\IAnalysisService.cs" />
+    <Compile Include="Services\Interfaces\IAssemblyService.cs" />
+    <Compile Include="Services\Interfaces\IDocumentService.cs" />
+    <Compile Include="Services\Interfaces\IDrawingService.cs" />
+    <Compile Include="Services\Interfaces\IPartService.cs" />
+    <Compile Include="Services\Interfaces\ISheetMetalService.cs" />
+    <Compile Include="Services\Interfaces\ISketchService.cs" />
     <Compile Include="Services\SolidWorksService.cs" />
     <Compile Include="Services\SolidWorksService.Sketch.cs" />
     <Compile Include="Services\SolidWorksService.Features.cs" />
     <Compile Include="Services\SolidWorksService.SheetMetal.cs" />
     <Compile Include="Services\SolidWorksService.Drawing.cs" />
+    <Compile Include="Services\SolidWorksService.DrawingEssentials.cs" />
     <Compile Include="Services\SolidWorksService.DrawingLayout.cs" />
     <Compile Include="Services\SolidWorksService.Analyze.cs" />
     <Compile Include="Services\SolidWorksService.Assembly.cs" />

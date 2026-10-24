@@ -346,14 +346,14 @@ namespace SolidworksExecution.Services
                     if (t == 2 && obj is IFace2 selFace)
                     {
                         if (allFaces == null) allFaces = FlattenFaces(partDoc);
-                        int i = IndexByJson(allFaces, BuildFaceJson(selFace, -1), BuildFaceJson);
+                        int i = IndexByFace(allFaces, BuildFaceJson(selFace, -1));
                         so = BuildFaceJson(selFace, i);
                         so["type"] = "face";
                     }
                     else if (t == 1 && obj is IEdge selEdge)
                     {
                         if (allEdges == null) allEdges = FlattenEdges(partDoc);
-                        int i = IndexByJson(allEdges, BuildEdgeJson(selEdge, -1), BuildEdgeJson);
+                        int i = IndexByEdge(allEdges, BuildEdgeJson(selEdge, -1));
                         so = BuildEdgeJson(selEdge, i);
                         so["type"] = "edge";
                     }
@@ -450,10 +450,69 @@ namespace SolidworksExecution.Services
         // geometry. (We can't use IEntity.IsSameAs — not exposed by this interop version — and RCW reference
         // equality is unreliable across separate COM calls.) Collisions need two geometrically identical
         // entities, which a valid solid doesn't have. -1 if no match.
-        private static int IndexByJson<T>(List<T> items, JObject target, Func<T, int, JObject> build)
+        private static int IndexByFace(List<IFace2> items, JObject targetFaceJson)
         {
+            if (items == null || targetFaceJson == null) return -1;
+            double targetArea = targetFaceJson.Value<double?>("area") ?? -1;
+
             for (int i = 0; i < items.Count; i++)
-                if (JToken.DeepEquals(build(items[i], -1), target)) return i;
+            {
+                var face = items[i];
+                if (face == null) continue;
+
+                // Quick geometric gate: compare area first (cheap COM call, zero allocation)
+                if (targetArea >= 0)
+                {
+                    try
+                    {
+                        if (Math.Abs(face.GetArea() - targetArea) > 1e-6)
+                            continue;
+                    }
+                    catch { }
+                }
+
+                // If area matches within 1µm², verify with DeepEquals
+                if (JToken.DeepEquals(BuildFaceJson(face, -1), targetFaceJson))
+                    return i;
+            }
+            return -1;
+        }
+
+        private static int IndexByEdge(List<IEdge> items, JObject targetEdgeJson)
+        {
+            if (items == null || targetEdgeJson == null) return -1;
+            var targetMid = targetEdgeJson["mid"] as JArray;
+
+            for (int i = 0; i < items.Count; i++)
+            {
+                var edge = items[i];
+                if (edge == null) continue;
+
+                if (targetMid != null && targetMid.Count >= 3)
+                {
+                    try
+                    {
+                        var cp = edge.GetCurveParams2() as double[];
+                        if (cp != null && cp.Length >= 6)
+                        {
+                            double midX = (cp[0] + cp[3]) / 2.0;
+                            double midY = (cp[1] + cp[4]) / 2.0;
+                            double midZ = (cp[2] + cp[5]) / 2.0;
+                            double tx = targetMid[0].Value<double>();
+                            double ty = targetMid[1].Value<double>();
+                            double tz = targetMid[2].Value<double>();
+
+                            // If chord midpoints differ by > 1mm, skip without allocating JObject
+                            if (Math.Abs(midX - tx) > 1e-3 || Math.Abs(midY - ty) > 1e-3 || Math.Abs(midZ - tz) > 1e-3)
+                                continue;
+                        }
+                    }
+                    catch { }
+                }
+
+                if (JToken.DeepEquals(BuildEdgeJson(edge, -1), targetEdgeJson))
+                    return i;
+            }
             return -1;
         }
 
@@ -518,10 +577,14 @@ namespace SolidworksExecution.Services
                         featArr.Add(sj);
                         meaningful++;
                     }
-                    sub = sub.GetNextSubFeature() as IFeature;
+                    var nextSub = sub.GetNextSubFeature() as IFeature;
+                    ComScope.Release(sub);
+                    sub = nextSub;
                 }
 
-                feat = feat.GetNextFeature() as IFeature;
+                var nextFeat = feat.GetNextFeature() as IFeature;
+                ComScope.Release(feat);
+                feat = nextFeat;
             }
 
             root["feature_count"] = meaningful;
@@ -1269,7 +1332,7 @@ namespace SolidworksExecution.Services
         // Single-edge JSON (start/end/MIDPOINT, +length for closed edges) — the shared reader behind both
         // ReadEdges and get_selection, so an analyzed edge and a user-selected edge report identical fields
         // (the "analyze ⊆ everything else" invariant, ADR-023 spirit). `idx` is the edge's stable index.
-        private JObject BuildEdgeJson(IEdge edge, int idx)
+        private static JObject BuildEdgeJson(IEdge edge, int idx)
         {
             var ej = new JObject();
             ej["i"] = idx;
@@ -1314,7 +1377,7 @@ namespace SolidworksExecution.Services
 
         // Single-face JSON (planar flag + normal/area/representative point for planar faces) — the shared
         // reader behind both ReadFaces and get_selection. `idx` is the face's stable index.
-        private JObject BuildFaceJson(IFace2 face, int idx)
+        private static JObject BuildFaceJson(IFace2 face, int idx)
         {
             var fj = new JObject();
             fj["i"] = idx;

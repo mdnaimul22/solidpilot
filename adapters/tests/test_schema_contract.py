@@ -31,7 +31,7 @@ import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ADAPTER_DIR = os.path.dirname(_HERE)
-_REPO_ROOT = os.path.dirname(os.path.dirname(_ADAPTER_DIR))
+_REPO_ROOT = os.path.dirname(_ADAPTER_DIR)
 _CONTRACT_PATH = os.path.join(
     _REPO_ROOT, "execution", "solidworks", "contracts", "tool-schemas.json"
 )

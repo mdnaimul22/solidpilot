@@ -1,7 +1,7 @@
 import os
 from dotenv import load_dotenv
 
-# Load adapters/claude/.env by EXPLICIT path. A bare load_dotenv() searches the current working
+# Load adapters/.env by EXPLICIT path. A bare load_dotenv() searches the current working
 # directory, but the MCP host launches server.py from an arbitrary cwd, so the adapter's own .env
 # was silently missed. Anchor it to this file's directory.
 load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
@@ -28,12 +28,12 @@ ENSURE_TIMEOUT = float(os.getenv("ENSURE_TIMEOUT", "120"))
 CONNECT_TIMEOUT = float(os.getenv("CONNECT_TIMEOUT", "10"))
 
 # Auto-start of the execution server (so the user never has to launch the exe by hand).
-# Default points at the standard Debug build output, two dirs up from this adapter package
-# (adapters/claude → repo root → execution/solidworks/...). Override via .env if needed.
+# Default points at the standard Debug build output, one dir up from this adapter package
+# (adapters → repo root → execution/solidworks/...). Override via .env if needed.
 _DEFAULT_EXE = os.path.normpath(
     os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
-        "..", "..",
+        "..",
         "execution", "solidworks", "SolidworksExecution", "bin", "Debug", "SolidworksExecution.exe",
     )
 )

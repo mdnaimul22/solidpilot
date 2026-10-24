@@ -22,7 +22,7 @@ try:
     from pycompiler.execution_port import ExecutionPort
 except ImportError:
     _HERE = os.path.dirname(os.path.abspath(__file__))
-    _COMPILER_ROOT = os.path.normpath(os.path.join(_HERE, "..", "..", "compiler", "solidworks"))
+    _COMPILER_ROOT = os.path.normpath(os.path.join(_HERE, "..", "compiler", "solidworks"))
     if _COMPILER_ROOT not in sys.path:
         sys.path.insert(0, _COMPILER_ROOT)
     from pycompiler.compiler import compile_and_run

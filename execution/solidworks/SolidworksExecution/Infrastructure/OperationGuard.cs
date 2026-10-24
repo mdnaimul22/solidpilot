@@ -9,8 +9,10 @@ namespace SolidworksExecution.Infrastructure
         private static readonly OperationGuard _instance = new OperationGuard();
         public static OperationGuard Instance => _instance;
 
+        private const int MaxTrackedOperations = 5000;
         private readonly ConcurrentDictionary<string, ExecutionResponse> _completed
             = new ConcurrentDictionary<string, ExecutionResponse>();
+        private readonly ConcurrentQueue<string> _operationOrder = new ConcurrentQueue<string>();
 
         private volatile int _currentStateVersion = 0;
 
@@ -42,10 +44,21 @@ namespace SolidworksExecution.Infrastructure
             return incomingStateVersion == _currentStateVersion;
         }
 
-        public void RegisterCompleted(string operationId, ExecutionResponse response)
+        public void RegisterCompleted(string operationId, ExecutionResponse response, bool incrementsState = true)
         {
             _completed[operationId] = response;
-            Interlocked.Increment(ref _currentStateVersion);
+            _operationOrder.Enqueue(operationId);
+
+            // Bounded memory protection for 30,000+ files: evict oldest entries beyond capacity
+            while (_operationOrder.Count > MaxTrackedOperations && _operationOrder.TryDequeue(out var oldId))
+            {
+                _completed.TryRemove(oldId, out _);
+            }
+
+            if (incrementsState)
+            {
+                Interlocked.Increment(ref _currentStateVersion);
+            }
         }
 
         public int GetCurrentStateVersion()

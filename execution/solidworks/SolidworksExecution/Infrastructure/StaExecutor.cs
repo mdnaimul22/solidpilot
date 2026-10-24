@@ -23,6 +23,8 @@ namespace SolidworksExecution.Infrastructure
 
         private readonly BlockingCollection<Action> _queue = new BlockingCollection<Action>();
 
+        private volatile int _staThreadId = -1;
+
         private StaExecutor()
         {
             var thread = new Thread(Worker)
@@ -34,17 +36,96 @@ namespace SolidworksExecution.Infrastructure
             thread.Start();
         }
 
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool PeekMessage(out MSG lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax, uint wRemoveMsg);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern bool TranslateMessage(ref MSG lpMsg);
+
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern IntPtr DispatchMessage(ref MSG lpMsg);
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        private struct MSG
+        {
+            public IntPtr hwnd;
+            public uint message;
+            public IntPtr wParam;
+            public IntPtr lParam;
+            public uint time;
+            public int pt_x;
+            public int pt_y;
+        }
+
+        public static void PumpMessages()
+        {
+            MSG msg;
+            while (PeekMessage(out msg, IntPtr.Zero, 0, 0, 1 /* PM_REMOVE */))
+            {
+                TranslateMessage(ref msg);
+                DispatchMessage(ref msg);
+            }
+        }
+
         private void Worker()
         {
-            // Each job sets its own completion event and captures its own exception, so a throwing
-            // job never tears down the worker loop.
-            foreach (var work in _queue.GetConsumingEnumerable())
-                work();
+            _staThreadId = Thread.CurrentThread.ManagedThreadId;
+            MessageFilter.Register();
+            try
+            {
+                // STA worker loop with continuous Windows message pumping (avoids ContextSwitchDeadlock)
+                while (!_queue.IsCompleted)
+                {
+                    Action work;
+                    if (_queue.TryTake(out work, 50))
+                    {
+                        work();
+                        PumpMessages();
+                    }
+                    else
+                    {
+                        PumpMessages();
+                    }
+                }
+            }
+            finally
+            {
+                MessageFilter.Revoke();
+            }
+        }
+
+        /// <summary>Marshal <paramref name="func"/> onto the STA thread non-blockingly via Task.</summary>
+        public System.Threading.Tasks.Task<T> RunAsync<T>(Func<T> func)
+        {
+            if (Thread.CurrentThread.ManagedThreadId == _staThreadId)
+            {
+                try { return System.Threading.Tasks.Task.FromResult(func()); }
+                catch (Exception ex)
+                {
+                    var failTcs = new System.Threading.Tasks.TaskCompletionSource<T>();
+                    failTcs.SetException(ex);
+                    return failTcs.Task;
+                }
+            }
+
+            var tcs = new System.Threading.Tasks.TaskCompletionSource<T>(System.Threading.Tasks.TaskCreationOptions.RunContinuationsAsynchronously);
+            _queue.Add(() =>
+            {
+                try { tcs.SetResult(func()); }
+                catch (Exception ex) { tcs.SetException(ex); }
+            });
+            return tcs.Task;
         }
 
         /// <summary>Marshal <paramref name="func"/> onto the STA thread and block until it returns.</summary>
         public T Run<T>(Func<T> func)
         {
+            if (Thread.CurrentThread.ManagedThreadId == _staThreadId)
+            {
+                // Re-entrant call on the STA thread: execute directly to prevent deadlock.
+                return func();
+            }
+
             T result = default(T);
             Exception captured = null;
             using (var done = new ManualResetEventSlim(false))

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Runtime.InteropServices;
 using Newtonsoft.Json.Linq;
 using SolidWorks.Interop.sldworks;
@@ -25,7 +26,92 @@ namespace SolidworksExecution.Services
     // Kept in one file, deliberately: these six belong to one workflow and one place to look.
     //
     // swconst values are INLINED ints (ADR-018): the swconst DLL is not copied to bin\Debug, so
-    // only compile-time constants may be used - never swconst types at runtime.
+    public class DrawingTemplateOptions
+    {
+        public string PageFormat { get; set; }
+        public string MetadataFormat { get; set; }
+        public string UnitsFormat { get; set; }
+        public string PartName { get; set; }
+        public string Material { get; set; }
+        public string Unit { get; set; }
+        public bool StampTitles { get; set; }
+        public bool StampMetadata { get; set; }
+        public Dictionary<string, string> ViewTitles { get; set; }
+
+        public DrawingTemplateOptions()
+        {
+            StampTitles = true;
+            StampMetadata = true;
+            ViewTitles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        public string GetPageFormat(int page, int pages)
+        {
+            if (!string.IsNullOrEmpty(PageFormat))
+                return PageFormat.Replace("{page}", page.ToString()).Replace("{pages}", pages.ToString());
+
+            return "PAGE " + page + " / " + pages;
+        }
+
+        public string GetMetadataFormat()
+        {
+            if (!string.IsNullOrEmpty(MetadataFormat))
+                return MetadataFormat;
+
+            return "Part Name : {part_name}\nUnit : {unit}\nMaterial : {material}";
+        }
+
+        public string GetUnitsFormat()
+        {
+            if (!string.IsNullOrEmpty(UnitsFormat))
+                return UnitsFormat;
+
+            return "Measurement : {units}";
+        }
+
+        public string GetViewTitle(string orient, string viewName)
+        {
+            if (!string.IsNullOrEmpty(viewName) && ViewTitles.ContainsKey(viewName))
+                return ViewTitles[viewName];
+
+            string key = (orient ?? "").ToLowerInvariant().TrimStart('*');
+            if (ViewTitles.ContainsKey(key))
+                return ViewTitles[key];
+
+            if (key.Contains("iso")) return "3D ISOMETRIC VIEW";
+            if (key.Contains("front")) return "SIDE VIEW 1 (FRONT)";
+            if (key.Contains("top")) return "TOP VIEW";
+            if (key.Contains("right") || key.Contains("side")) return "SIDE VIEW 2 (SIDE)";
+            if (!string.IsNullOrEmpty(key)) return key.ToUpperInvariant() + " VIEW";
+            return "";
+        }
+
+        public static DrawingTemplateOptions FromParams(JObject p)
+        {
+            var opts = new DrawingTemplateOptions();
+            if (p == null) return opts;
+
+            opts.PageFormat = p.Value<string>("page_format");
+            opts.MetadataFormat = p.Value<string>("metadata_format");
+            opts.UnitsFormat = p.Value<string>("units_format");
+            opts.PartName = p.Value<string>("part_name");
+            opts.Material = p.Value<string>("material");
+            opts.Unit = p.Value<string>("unit");
+            if (p["stamp_titles"] != null) opts.StampTitles = p.Value<bool>("stamp_titles");
+            if (p["stamp_metadata"] != null) opts.StampMetadata = p.Value<bool>("stamp_metadata");
+
+            var vt = p["view_titles"] as JObject;
+            if (vt != null)
+            {
+                foreach (var prop in vt.Properties())
+                {
+                    opts.ViewTitles[prop.Name] = prop.Value != null ? prop.Value.ToString() : "";
+                }
+            }
+            return opts;
+        }
+    }
+
     public partial class SolidWorksService
     {
         // swUserPreferenceIntegerValue_e
@@ -66,18 +152,7 @@ namespace SolidworksExecution.Services
         // =====================================================================
         public ExecutionResponse SetDocumentUnits(ToolRequest request)
         {
-            if (_guard.IsDuplicate(request.OperationId))
-                return _guard.GetDuplicate(request.OperationId);
-
-            if (!_guard.IsStateVersionValid(request.StateVersion))
-                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                    "INVALID_STATE_VERSION", "Incoming state_version does not match current state.");
-
-            if (!EnsureConnected())
-                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                    "COM_ATTACH_FAILED", "SolidWorks process not found or COM not registered.");
-
-            try
+            return ExecuteGuarded(request, modelDoc =>
             {
                 var p = request.Params as JObject;
                 string linearIn = p?.Value<string>("linear") ?? "mm";
@@ -91,11 +166,6 @@ namespace SolidworksExecution.Services
                         "UNSUPPORTED_UNIT",
                         "linear must be one of: mm, cm, m, in, ft, ft-in, micron, mil, uin.");
 
-                var modelDoc = _solidWorks.IActiveDoc2 as IModelDoc2;
-                if (modelDoc == null)
-                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                        "NO_ACTIVE_DOCUMENT", "No active document found in SolidWorks.");
-
                 // Set the unit system first, then the concrete linear unit (which switches the
                 // document to Custom units), then the decimal places - this order is what the
                 // SolidWorks UI itself does.
@@ -106,7 +176,7 @@ namespace SolidworksExecution.Services
                 int readUnit = ext.GetUserPreferenceInteger(SW_PREF_UNITS_LINEAR, 0);
                 int readDecimals = ext.GetUserPreferenceInteger(SW_PREF_UNITS_DECIMALS, 0);
 
-                var response = new ExecutionResponse
+                return new ExecutionResponse
                 {
                     OperationId = request.OperationId,
                     Status = "COMPLETED",
@@ -129,23 +199,54 @@ namespace SolidworksExecution.Services
                     },
                     Error = null
                 };
-
-                _guard.RegisterCompleted(request.OperationId, response);
-                return response;
-            }
-            catch (COMException ex)
-            {
-                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "COM_ERROR", ex.Message);
-            }
-            catch (Exception ex)
-            {
-                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "UNEXPECTED_ERROR", ex.Message);
-            }
+            }, requiresDrawing: false, requiresPartOrAssembly: false, requiresActiveDoc: true);
         }
 
         // =====================================================================
         // automatic view placement (no overlap, third-angle alignment)
         // =====================================================================
+        // A view placed before the paper changed can end up OFF the sheet: set_drawing_sheet resized
+        // the paper and left every view where it was (measured on Part2: the isometric view's left
+        // edge sat at -28.6 mm on an A4 sheet). Only views that are actually outside are moved; a
+        // view that already fits keeps the author's position.
+        private int RelocateViewsOutsideSheet(IDrawingDoc drawingDoc)
+        {
+            double sheetW = 0.420, sheetH = 0.297;
+            var sheet = drawingDoc.GetCurrentSheet() as ISheet;
+            if (sheet != null) sheet.GetSize(ref sheetW, ref sheetH);
+
+            int moved = 0;
+            var v = drawingDoc.GetFirstView() as IView;
+            while (v != null)
+            {
+                IView next = null;
+                try { next = v.GetNextView() as IView; } catch { }
+                if (v.Type != 1)
+                {
+                    var b = v.GetOutline() as double[];
+                    bool outside = b != null && b.Length >= 4 &&
+                        (b[0] < -0.005 || b[1] < -0.005 || b[2] > sheetW + 0.005 || b[3] > sheetH + 0.005);
+                    if (outside)
+                    {
+                        PlaceViewWithoutOverlap(drawingDoc, v, false);
+                        var after = v.GetOutline() as double[];
+                        bool still = after != null && after.Length >= 4 &&
+                            (after[0] < -1e-6 || after[1] < -1e-6 || after[2] > sheetW + 1e-6 || after[3] > sheetH + 1e-6);
+                        if (!still) moved++;
+                        ExecLog.Write($"layout relocate '{v.Name}' before={Box(b)} after={Box(after)} ok={!still}");
+                    }
+                }
+                v = next;
+            }
+            return moved;
+        }
+
+        private static string Box(double[] b)
+        {
+            return b == null || b.Length < 4 ? "none"
+                : $"[{b[0] * 1000:0.#},{b[1] * 1000:0.#},{b[2] * 1000:0.#},{b[3] * 1000:0.#}]";
+        }
+
         private void PlaceViewWithoutOverlap(IDrawingDoc drawingDoc, IView view, bool searchEvenIfLegal)
         {
             const double gap = 0.012;
@@ -447,30 +548,24 @@ namespace SolidworksExecution.Services
             ext.SetUserPreferenceInteger(SW_PREF_UNIT_SYSTEM, 0, unitSystem);
             ext.SetUserPreferenceInteger(SW_PREF_UNITS_LINEAR, 0, unit);
             ext.SetUserPreferenceInteger(SW_PREF_UNITS_DECIMALS, 0, decimals);
-            ext.SetUserPreferenceDouble((int)swUserPreferenceDoubleValue_e.swDetailingDimFontHeight, 0, 0.0028);
-            ext.SetUserPreferenceDouble((int)swUserPreferenceDoubleValue_e.swDetailingNoteFontHeight, 0, 0.0030);
+            ApplyAnnotationFonts(modelDoc);
             modelDoc.GraphicsRedraw2();
+        }
+
+        private void ApplyAnnotationFonts(IModelDoc2 modelDoc)
+        {
+            const double dimTextHeightM = 0.0028;
+            const double noteTextHeightM = 0.0030;
+            var ext = modelDoc.Extension;
+            ext.SetUserPreferenceDouble((int)swUserPreferenceDoubleValue_e.swDetailingDimFontHeight, 0, dimTextHeightM);
+            ext.SetUserPreferenceDouble((int)swUserPreferenceDoubleValue_e.swDetailingNoteFontHeight, 0, noteTextHeightM);
         }
         public ExecutionResponse SetDrawingSheet(ToolRequest request)
         {
-            if (_guard.IsDuplicate(request.OperationId))
-                return _guard.GetDuplicate(request.OperationId);
-
-            if (!_guard.IsStateVersionValid(request.StateVersion))
-                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                    "INVALID_STATE_VERSION", "Incoming state_version does not match current state.");
-
-            if (!EnsureConnected())
-                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                    "COM_ATTACH_FAILED", "SolidWorks process not found or COM not registered.");
-
-            try
+            return ExecuteGuarded(request, modelDoc =>
             {
                 var p = request.Params as JObject;
-                var drawingDoc = _solidWorks.IActiveDoc2 as IDrawingDoc;
-                if (drawingDoc == null)
-                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                        "WRONG_DOCUMENT_TYPE", "set_drawing_sheet requires an active drawing document.");
+                var drawingDoc = (IDrawingDoc)modelDoc;
 
                 string sheetName = p?.Value<string>("sheet") ?? "";
                 string size = p?.Value<string>("size") ?? "";
@@ -486,6 +581,12 @@ namespace SolidworksExecution.Services
                 if (sheet == null)
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                         "NO_SHEET", "The active drawing has no current sheet.");
+
+                bool hideFormat = p?.Value<bool?>("hide_sheet_format") ?? true;
+                if (hideFormat)
+                {
+                    try { sheet.SheetFormatVisible = false; } catch { }
+                }
 
                 if (!string.IsNullOrEmpty(size))
                 {
@@ -504,20 +605,44 @@ namespace SolidworksExecution.Services
                     }
                 }
 
-                // NOTE - the sheet SCALE is deliberately not set here. On a sheet that carries a
-                // sheet format (Sheet1 of any drawing made from the template) ISheet.SetScale does
-                // not produce the ratio you asked for: SetScale(1,2) reads back as "1:24", while
-                // SetScale(1,1) reads back as "1:1" - the format's own scale is folded in. On a
-                // format-less sheet (add_drawing_sheet) it behaves exactly. Since the drawing scale
-                // that matters is the VIEW scale (add_drawing_view), and the printed scale is free
-                // text on the sheet, this tool leaves the sheet scale alone.
-                var modelDoc = (IModelDoc2)drawingDoc;
                 modelDoc.GraphicsRedraw2();
 
                 double aw = 0, ah = 0;
                 sheet.GetSize(ref aw, ref ah);
 
-                var response = new ExecutionResponse
+                var customPositions = p?["positions"] as JObject;
+                if (customPositions != null)
+                {
+                    var cv = drawingDoc.GetFirstView() as IView;
+                    while (cv != null)
+                    {
+                        var pos = customPositions[cv.Name] as JArray;
+                        if (pos != null && pos.Count >= 2)
+                        {
+                            cv.Position = new double[] { (double)pos[0], (double)pos[1] };
+                            if (pos.Count >= 3)
+                            {
+                                cv.ScaleDecimal = (double)pos[2];
+                            }
+                        }
+                        cv = cv.GetNextView() as IView;
+                    }
+                    modelDoc.GraphicsRedraw2();
+                }
+
+                bool layout3dFirst = p?.Value<bool?>("layout_3d_first") ?? false;
+                if (layout3dFirst && customPositions == null)
+                {
+                    ApplyStandard3DFirstLayout(drawingDoc, aw, ah);
+                    modelDoc.GraphicsRedraw2();
+                }
+
+                bool autoRelocate = p?.Value<bool?>("auto_relocate") ?? false;
+                int relocated = autoRelocate ? RelocateViewsOutsideSheet(drawingDoc) : 0;
+                var templateOptions = DrawingTemplateOptions.FromParams(p);
+                int stamped = ApplySheetStyle(drawingDoc, templateOptions);
+
+                return new ExecutionResponse
                 {
                     OperationId = request.OperationId,
                     Status = "COMPLETED",
@@ -539,22 +664,33 @@ namespace SolidworksExecution.Services
                         ["orientation"] = orientation,
                         ["width"] = R6(aw),
                         ["height"] = R6(ah),
-                        ["sheet_count"] = drawingDoc.GetSheetCount()
+                        ["sheet_count"] = drawingDoc.GetSheetCount(),
+                        ["views_relocated"] = relocated,
+                        ["sheets_stamped"] = stamped,
+                        ["views"] = new Func<JArray>(() => {
+                            var arr = new JArray();
+                            var vs = drawingDoc.GetFirstView() as IView;
+                            while (vs != null) {
+                                if (vs.Type != 1) {
+                                    var pos = vs.Position as double[];
+                                    var outline = vs.GetOutline() as double[];
+                                    arr.Add(new JObject {
+                                        ["name"] = vs.Name,
+                                        ["x"] = pos != null && pos.Length >= 2 ? R6(pos[0]) : 0,
+                                        ["y"] = pos != null && pos.Length >= 2 ? R6(pos[1]) : 0,
+                                        ["scale"] = R6(vs.ScaleDecimal),
+                                        ["outline"] = outline != null && outline.Length >= 4 ?
+                                            new JArray { R6(outline[0]), R6(outline[1]), R6(outline[2]), R6(outline[3]) } : null
+                                    });
+                                }
+                                vs = vs.GetNextView() as IView;
+                            }
+                            return arr;
+                        })()
                     },
                     Error = null
                 };
-
-                _guard.RegisterCompleted(request.OperationId, response);
-                return response;
-            }
-            catch (COMException ex)
-            {
-                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "COM_ERROR", ex.Message);
-            }
-            catch (Exception ex)
-            {
-                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "UNEXPECTED_ERROR", ex.Message);
-            }
+            }, requiresDrawing: true);
         }
 
         // =====================================================================
@@ -562,24 +698,10 @@ namespace SolidworksExecution.Services
         // =====================================================================
         public ExecutionResponse AddDrawingSheet(ToolRequest request)
         {
-            if (_guard.IsDuplicate(request.OperationId))
-                return _guard.GetDuplicate(request.OperationId);
-
-            if (!_guard.IsStateVersionValid(request.StateVersion))
-                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                    "INVALID_STATE_VERSION", "Incoming state_version does not match current state.");
-
-            if (!EnsureConnected())
-                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                    "COM_ATTACH_FAILED", "SolidWorks process not found or COM not registered.");
-
-            try
+            return ExecuteGuarded(request, modelDoc =>
             {
                 var p = request.Params as JObject;
-                var drawingDoc = _solidWorks.IActiveDoc2 as IDrawingDoc;
-                if (drawingDoc == null)
-                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                        "WRONG_DOCUMENT_TYPE", "add_drawing_sheet requires an active drawing document.");
+                var drawingDoc = (IDrawingDoc)modelDoc;
 
                 string name = p?.Value<string>("name") ?? "";
                 string size = p?.Value<string>("size") ?? "A4";
@@ -596,14 +718,6 @@ namespace SolidworksExecution.Services
                 if (string.IsNullOrEmpty(name))
                     name = "Sheet" + (drawingDoc.GetSheetCount() + 1);
 
-                // swDwgTemplateNone: add a sheet with NO sheet format (no border/title block),
-                // matching the plain-text layout this tool set produces. The paper size still
-                // comes from the paper enum + width/height. Scale 1:1 - a new sheet has no format
-                // to fold in, and the drawing scale that matters is the view scale.
-                // NewSheet2's return value is NOT reliable: after an ISheet.SetSize on the current
-                // sheet it returns FALSE while still creating the sheet (verified). Trust the sheet
-                // COUNT instead, and take the new sheet's NAME from the sheet list, because
-                // SolidWorks renames on a collision rather than failing.
                 var sheetBefore = drawingDoc.GetCurrentSheet() as ISheet;
                 string previousName = sheetBefore != null ? sheetBefore.GetName() : "";
 
@@ -616,10 +730,6 @@ namespace SolidworksExecution.Services
                         "SHEET_CREATE_FAILED",
                         "SolidWorks kept the drawing at " + sheetsBefore + " sheet(s).");
 
-                // The paper size passed to NewSheet2 is ignored just as often: the new sheet can
-                // inherit the CURRENT sheet's size (verified - a landscape request on a portrait
-                // sheet came back portrait). Make it current, set the size the same verified way
-                // set_drawing_sheet does, and read it back.
                 drawingDoc.ActivateSheet(newName);
                 var sheet = drawingDoc.GetCurrentSheet() as ISheet;
                 double aw = w, ah = h;
@@ -640,10 +750,12 @@ namespace SolidworksExecution.Services
                 if (!activate && !string.IsNullOrEmpty(previousName))
                     drawingDoc.ActivateSheet(previousName);
 
-                var modelDoc = (IModelDoc2)drawingDoc;
+                var templateOptions = DrawingTemplateOptions.FromParams(p);
+                int stamped = ApplySheetStyle(drawingDoc, templateOptions);
+
                 modelDoc.GraphicsRedraw2();
 
-                var response = new ExecutionResponse
+                return new ExecutionResponse
                 {
                     OperationId = request.OperationId,
                     Status = "COMPLETED",
@@ -665,22 +777,12 @@ namespace SolidworksExecution.Services
                         ["orientation"] = orientation,
                         ["width"] = R6(aw),
                         ["height"] = R6(ah),
-                        ["sheet_count"] = drawingDoc.GetSheetCount()
+                        ["sheet_count"] = drawingDoc.GetSheetCount(),
+                        ["sheets_stamped"] = stamped
                     },
                     Error = null
                 };
-
-                _guard.RegisterCompleted(request.OperationId, response);
-                return response;
-            }
-            catch (COMException ex)
-            {
-                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "COM_ERROR", ex.Message);
-            }
-            catch (Exception ex)
-            {
-                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "UNEXPECTED_ERROR", ex.Message);
-            }
+            }, requiresDrawing: true);
         }
 
         // =====================================================================
@@ -688,18 +790,7 @@ namespace SolidworksExecution.Services
         // =====================================================================
         public ExecutionResponse AddDrawingNote(ToolRequest request)
         {
-            if (_guard.IsDuplicate(request.OperationId))
-                return _guard.GetDuplicate(request.OperationId);
-
-            if (!_guard.IsStateVersionValid(request.StateVersion))
-                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                    "INVALID_STATE_VERSION", "Incoming state_version does not match current state.");
-
-            if (!EnsureConnected())
-                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                    "COM_ATTACH_FAILED", "SolidWorks process not found or COM not registered.");
-
-            try
+            return ExecuteGuarded(request, modelDoc =>
             {
                 var p = request.Params as JObject;
                 string text = p?.Value<string>("text");
@@ -723,16 +814,12 @@ namespace SolidworksExecution.Services
                 string leaderSide = p?.Value<string>("leader_side") ?? "right";
                 string sheetName = p?.Value<string>("sheet") ?? "";
 
-                var drawingDoc = _solidWorks.IActiveDoc2 as IDrawingDoc;
-                if (drawingDoc == null)
-                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                        "WRONG_DOCUMENT_TYPE", "add_drawing_note requires an active drawing document.");
+                var drawingDoc = (IDrawingDoc)modelDoc;
 
                 if (!string.IsNullOrEmpty(sheetName) && !drawingDoc.ActivateSheet(sheetName))
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                         "SHEET_NOT_FOUND", "No sheet named '" + sheetName + "' in the active drawing.");
 
-                var modelDoc = (IModelDoc2)drawingDoc;
                 string resolved = ResolveNotePlaceholders(text, drawingDoc, modelDoc);
                 int before = TotalNoteCount(drawingDoc);
 
@@ -754,8 +841,6 @@ namespace SolidworksExecution.Services
 
                     drawingDoc.InsertNewNote(resolved, false, false, true, SW_ARROW_OPEN, (short)MapLeaderSide(leaderSide));
                     note = ((ISelectionMgr)modelDoc.SelectionManager).GetSelectedObject6(1, -1) as Note;
-                    // InsertNewNote usually leaves the note selected, but not always; fall back to
-                    // finding it by its (resolved) text.
                     if (note == null)
                         note = FindNoteByText(drawingDoc, resolved);
                 }
@@ -768,18 +853,15 @@ namespace SolidworksExecution.Services
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                         "NOTE_CREATE_FAILED", "SolidWorks did not return the inserted note.");
 
-                // Position + style. SetTextPoint moves the note's text anchor; a leader stays attached.
                 note.SetTextPoint(xIn.Value, yIn.Value, 0);
 
                 try { note.SetHeight(height); }
-                catch (Exception) { /* height is best-effort: a locked style must not fail the note */ }
+                catch (Exception) { }
 
                 note.SetTextJustification(MapJustification(justification));
 
                 if (bold || italic)
                 {
-                    // Cosmetic, best-effort: SolidWorks exposes no separate "text format type" enum
-                    // in this version, so 0 = the whole-note format.
                     try
                     {
                         var tf = note.GetTextFormat() as ITextFormat;
@@ -790,7 +872,7 @@ namespace SolidworksExecution.Services
                             note.SetTextFormat(0, tf);
                         }
                     }
-                    catch (Exception) { /* font styling is cosmetic */ }
+                    catch (Exception) { }
                 }
 
                 modelDoc.GraphicsRedraw2();
@@ -806,7 +888,7 @@ namespace SolidworksExecution.Services
                 }
                 catch (Exception) { }
 
-                var response = new ExecutionResponse
+                return new ExecutionResponse
                 {
                     OperationId = request.OperationId,
                     Status = "COMPLETED",
@@ -826,10 +908,6 @@ namespace SolidworksExecution.Services
                         ["text"] = text,
                         ["resolved_text"] = resolved,
                         ["note"] = noteName,
-                        // Only the DELTA is reported, not the absolute count: SolidWorks' view
-                        // traversal over-counts once a drawing has more than one sheet (1 note
-                        // reads back as 58), so an absolute number would be a lie. The delta is
-                        // measured against itself and stays honest.
                         ["added"] = after - before,
                         ["sheet"] = sheet != null ? sheet.GetName() : sheetName,
                         ["x"] = R6(xIn.Value),
@@ -839,18 +917,7 @@ namespace SolidworksExecution.Services
                     },
                     Error = null
                 };
-
-                _guard.RegisterCompleted(request.OperationId, response);
-                return response;
-            }
-            catch (COMException ex)
-            {
-                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "COM_ERROR", ex.Message);
-            }
-            catch (Exception ex)
-            {
-                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "UNEXPECTED_ERROR", ex.Message);
-            }
+            }, requiresDrawing: true);
         }
 
         // =====================================================================
@@ -858,18 +925,7 @@ namespace SolidworksExecution.Services
         // =====================================================================
         public ExecutionResponse AddBalloon(ToolRequest request)
         {
-            if (_guard.IsDuplicate(request.OperationId))
-                return _guard.GetDuplicate(request.OperationId);
-
-            if (!_guard.IsStateVersionValid(request.StateVersion))
-                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                    "INVALID_STATE_VERSION", "Incoming state_version does not match current state.");
-
-            if (!EnsureConnected())
-                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                    "COM_ATTACH_FAILED", "SolidWorks process not found or COM not registered.");
-
-            try
+            return ExecuteGuarded(request, modelDoc =>
             {
                 var p = request.Params as JObject;
                 double? xIn = p?.Value<double?>("x");
@@ -888,12 +944,7 @@ namespace SolidworksExecution.Services
                         "UNSUPPORTED_STYLE",
                         "style must be one of: circle, box, square, hexagon, diamond, triangle, underline.");
 
-                var drawingDoc = _solidWorks.IActiveDoc2 as IDrawingDoc;
-                if (drawingDoc == null)
-                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                        "WRONG_DOCUMENT_TYPE", "add_balloon requires an active drawing document.");
-
-                var modelDoc = (IModelDoc2)drawingDoc;
+                var drawingDoc = (IDrawingDoc)modelDoc;
                 modelDoc.ClearSelection2(true);
 
                 if (!modelDoc.Extension.SelectByID2("", "COMPONENT", xIn.Value, yIn.Value, 0, false, 0, null, 0))
@@ -918,17 +969,12 @@ namespace SolidworksExecution.Services
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                         "BALLOON_CREATE_FAILED", "SolidWorks did not create the balloon.");
 
-                // IBalloonOptions.UpperText does not reliably survive InsertBOMBalloon2 (the balloon
-                // comes back as "?"), so for custom text set it on the note itself - INote.SetText is
-                // authoritative and is what the balloon renders.
                 if (!string.IsNullOrEmpty(text))
                 {
                     try { note.SetText(text); }
                     catch (Exception) { }
                 }
 
-                // Optional explicit balloon placement: the leader still attaches to the picked
-                // component, but the balloon circle is moved to (text_x, text_y).
                 double? textX = p?.Value<double?>("text_x");
                 double? textY = p?.Value<double?>("text_y");
                 if (textX != null && textY != null)
@@ -953,7 +999,7 @@ namespace SolidworksExecution.Services
                 }
                 catch (Exception) { }
 
-                var response = new ExecutionResponse
+                return new ExecutionResponse
                 {
                     OperationId = request.OperationId,
                     Status = "COMPLETED",
@@ -980,18 +1026,7 @@ namespace SolidworksExecution.Services
                     },
                     Error = null
                 };
-
-                _guard.RegisterCompleted(request.OperationId, response);
-                return response;
-            }
-            catch (COMException ex)
-            {
-                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "COM_ERROR", ex.Message);
-            }
-            catch (Exception ex)
-            {
-                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "UNEXPECTED_ERROR", ex.Message);
-            }
+            }, requiresDrawing: true);
         }
 
         // =====================================================================
@@ -999,18 +1034,7 @@ namespace SolidworksExecution.Services
         // =====================================================================
         public ExecutionResponse AutoBalloon(ToolRequest request)
         {
-            if (_guard.IsDuplicate(request.OperationId))
-                return _guard.GetDuplicate(request.OperationId);
-
-            if (!_guard.IsStateVersionValid(request.StateVersion))
-                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                    "INVALID_STATE_VERSION", "Incoming state_version does not match current state.");
-
-            if (!EnsureConnected())
-                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                    "COM_ATTACH_FAILED", "SolidWorks process not found or COM not registered.");
-
-            try
+            return ExecuteGuarded(request, modelDoc =>
             {
                 var p = request.Params as JObject;
                 string viewName = p?.Value<string>("view");
@@ -1033,17 +1057,13 @@ namespace SolidworksExecution.Services
                         "UNSUPPORTED_STYLE",
                         "style must be one of: circle, box, square, hexagon, diamond, triangle, underline.");
 
-                var drawingDoc = _solidWorks.IActiveDoc2 as IDrawingDoc;
-                if (drawingDoc == null)
-                    return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
-                        "WRONG_DOCUMENT_TYPE", "auto_balloon requires an active drawing document.");
+                var drawingDoc = (IDrawingDoc)modelDoc;
 
                 var view = FindViewObjectByName(drawingDoc, viewName);
                 if (view == null)
                     return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(),
                         "VIEW_NOT_FOUND", "No drawing view named '" + viewName + "' on the active sheet.");
 
-                var modelDoc = (IModelDoc2)drawingDoc;
                 modelDoc.ClearSelection2(true);
 
                 if (!modelDoc.Extension.SelectByID2(viewName, "DRAWINGVIEW", 0, 0, 0, false, 0, null, 0))
@@ -1078,7 +1098,7 @@ namespace SolidworksExecution.Services
                 }
                 catch (Exception) { }
 
-                var response = new ExecutionResponse
+                return new ExecutionResponse
                 {
                     OperationId = request.OperationId,
                     Status = "COMPLETED",
@@ -1104,18 +1124,7 @@ namespace SolidworksExecution.Services
                     },
                     Error = null
                 };
-
-                _guard.RegisterCompleted(request.OperationId, response);
-                return response;
-            }
-            catch (COMException ex)
-            {
-                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "COM_ERROR", ex.Message);
-            }
-            catch (Exception ex)
-            {
-                return BuildFailed(request.OperationId, _guard.GetCurrentStateVersion(), "UNEXPECTED_ERROR", ex.Message);
-            }
+            }, requiresDrawing: true);
         }
 
         // =====================================================================
@@ -1370,6 +1379,233 @@ namespace SolidworksExecution.Services
             return found;
         }
 
+        private bool ApplyStandard3DFirstLayout(IDrawingDoc drawingDoc, double sheetW, double sheetH)
+        {
+            var v = drawingDoc.GetFirstView() as IView;
+            IView isoView = null;
+            IView topView = null;
+            IView frontView = null;
+            IView rightView = null;
+
+            while (v != null)
+            {
+                if (v.Type != 1)
+                {
+                    string orient = "";
+                    try { orient = v.GetOrientationName() ?? ""; } catch { }
+                    string low = orient.ToLowerInvariant();
+                    if (low.Contains("iso") || low.Contains("dim") || low.Contains("trim"))
+                        isoView = v;
+                    else if (low.Contains("top"))
+                        topView = v;
+                    else if (low.Contains("front"))
+                        frontView = v;
+                    else if (low.Contains("right"))
+                        rightView = v;
+                }
+                v = v.GetNextView() as IView;
+            }
+
+            if (isoView == null) return false;
+
+            // 3D View: Left column (placed first at the beginning of the drawing)
+            double isoX = sheetW * 0.22;
+            double isoY = sheetH * 0.60;
+            isoView.Position = new double[] { isoX, isoY };
+
+            if (topView != null && frontView != null && rightView != null)
+            {
+                // Middle column: Top View above Front (Side 1) View
+                double col2X = sheetW * 0.49;
+                double col3X = sheetW * 0.76;
+                double rowTopY = sheetH * 0.76;
+                double rowBotY = sheetH * 0.33;
+
+                topView.Position = new double[] { col2X, rowTopY };
+                frontView.Position = new double[] { col2X, rowBotY };
+                rightView.Position = new double[] { col3X, rowBotY };
+            }
+            ExecLog.Write($"layout 3D-first applied: iso=({isoX*1000:0.#},{isoY*1000:0.#}) sheet={sheetW*1000:0}x{sheetH*1000:0}");
+            return true;
+        }
+
+        private void StampViewTitles(IDrawingDoc drawingDoc, DrawingTemplateOptions options)
+        {
+            var sheet = drawingDoc.GetCurrentSheet() as ISheet;
+            if (sheet == null) return;
+            try { drawingDoc.ActivateView(sheet.GetName()); } catch { }
+            var modelDoc = (IModelDoc2)drawingDoc;
+
+            var v = drawingDoc.GetFirstView() as IView;
+            while (v != null)
+            {
+                if (v.Type != 1)
+                {
+                    string orient = "";
+                    try { orient = v.GetOrientationName() ?? ""; } catch { }
+                    string title = options.GetViewTitle(orient, v.Name);
+                    if (!string.IsNullOrEmpty(title))
+                    {
+                        var b = v.GetOutline() as double[];
+                        if (b != null && b.Length >= 4)
+                        {
+                            double cx = (b[0] + b[2]) / 2.0;
+                            double cy = Math.Max(0.012, b[1] - 0.007);
+                            double xOffset = title.Length * 0.0011;
+
+                            var note = modelDoc.InsertNote(title) as Note;
+                            if (note != null)
+                            {
+                                note.SetTextPoint(Math.Max(0.010, cx - xOffset), cy, 0);
+                                try { note.SetHeight(0.0035); } catch { }
+                                try
+                                {
+                                    var tf = note.GetTextFormat() as ITextFormat;
+                                    if (tf != null)
+                                    {
+                                        tf.Bold = true;
+                                        note.SetTextFormat(0, tf);
+                                    }
+                                }
+                                catch { }
+                            }
+                            modelDoc.ClearSelection2(true);
+                        }
+                    }
+                }
+                v = v.GetNextView() as IView;
+            }
+        }
+
+        // Sheet style deployed by the tool itself: page number top-right, print scale bottom-left,
+        // metadata block (Part Name / Unit / Material) bottom-left, and measurement unit bottom-right.
+        // All are ordinary notes, so they print with the sheet; re-running replaces the previous
+        // stamp instead of stacking a second copy.
+        private int ApplySheetStyle(IDrawingDoc drawingDoc, DrawingTemplateOptions options = null)
+        {
+            if (options == null) options = new DrawingTemplateOptions();
+            var modelDoc = (IModelDoc2)drawingDoc;
+            var names = drawingDoc.GetSheetNames() as string[];
+            if (names == null || names.Length == 0) return 0;
+
+            string original = null;
+            try { original = (drawingDoc.GetCurrentSheet() as ISheet)?.GetName(); } catch { }
+
+            int stamped = 0;
+            for (int i = 0; i < names.Length; i++)
+            {
+                if (!drawingDoc.ActivateSheet(names[i])) continue;
+                var sheet = drawingDoc.GetCurrentSheet() as ISheet;
+                if (sheet == null) continue;
+
+                try { sheet.SheetFormatVisible = false; } catch { }
+                try { drawingDoc.ActivateView(names[i]); } catch { }
+
+                RemoveSheetStamps(drawingDoc, options);
+
+                double w = 0, h = 0;
+                sheet.GetSize(ref w, ref h);
+
+                // Top-right: Page number
+                StampNote(drawingDoc, options.GetPageFormat(i + 1, names.Length), w - 0.0295, h - 0.0085);
+
+                if (options.StampMetadata)
+                {
+                    // Bottom-left: Metadata block
+                    string partMeta = ResolveNotePlaceholders(options.GetMetadataFormat(), drawingDoc, modelDoc, options);
+                    StampNote(drawingDoc, partMeta, 0.015, 0.018);
+
+                    // Bottom-right: Units
+                    string measureMeta = ResolveNotePlaceholders(options.GetUnitsFormat(), drawingDoc, modelDoc, options);
+                    StampNote(drawingDoc, measureMeta, Math.Max(0.18, w - 0.050), 0.012);
+                }
+
+                if (options.StampTitles)
+                {
+                    StampViewTitles(drawingDoc, options);
+                }
+
+                stamped++;
+            }
+
+            if (!string.IsNullOrEmpty(original)) drawingDoc.ActivateSheet(original);
+            modelDoc.GraphicsRedraw2();
+            return stamped;
+        }
+
+        private void StampNote(IDrawingDoc drawingDoc, string text, double x, double y)
+        {
+            var sheet = drawingDoc.GetCurrentSheet() as ISheet;
+            if (sheet != null)
+            {
+                try { drawingDoc.ActivateView(sheet.GetName()); } catch { }
+            }
+            var modelDoc = (IModelDoc2)drawingDoc;
+            var note = modelDoc.InsertNote(text) as Note;
+            if (note == null) return;
+            note.SetTextPoint(x, y, 0);
+            try { note.SetHeight(0.0030); } catch { }
+            modelDoc.ClearSelection2(true);
+        }
+
+        private static void RemoveSheetStamps(IDrawingDoc drawingDoc, DrawingTemplateOptions options = null)
+        {
+            var modelDoc = (IModelDoc2)drawingDoc;
+            var view = drawingDoc.GetFirstView() as IView;
+            while (view != null)
+            {
+                var notes = view.GetNotes() as object[];
+                if (notes != null)
+                {
+                    foreach (var o in notes)
+                    {
+                        var n = o as Note;
+                        if (n == null) continue;
+                        string t = "";
+                        try { t = n.GetText() ?? ""; } catch { }
+                        bool stamp = (t.Contains(" / ") && (t.StartsWith("PAGE ", StringComparison.Ordinal) || t.Contains("PAGE") || t.Contains("পৃষ্ঠা")))
+                                  || t.StartsWith("SCALE ", StringComparison.Ordinal)
+                                  || t.IndexOf("Part Name", StringComparison.OrdinalIgnoreCase) >= 0
+                                  || t.IndexOf("Measurement", StringComparison.OrdinalIgnoreCase) >= 0
+                                  || t.IndexOf("অংশের নাম", StringComparison.OrdinalIgnoreCase) >= 0
+                                  || t.IndexOf("পরিমাপ", StringComparison.OrdinalIgnoreCase) >= 0
+                                  || t.IndexOf(" VIEW", StringComparison.OrdinalIgnoreCase) >= 0
+                                  || t.IndexOf("ভিউ", StringComparison.Ordinal) >= 0
+                                  || (options != null && options.ViewTitles != null && options.ViewTitles.Values.Any(v => !string.IsNullOrEmpty(v) && t.Equals(v, StringComparison.OrdinalIgnoreCase)))
+                                  || (options != null && !string.IsNullOrEmpty(options.PartName) && t.Contains(options.PartName))
+                                  || t.IndexOf("samartha", StringComparison.OrdinalIgnoreCase) >= 0
+                                  || t.IndexOf("20/04/22", StringComparison.OrdinalIgnoreCase) >= 0;
+                        if (!stamp) continue;
+
+                        var ann = n.GetAnnotation() as IAnnotation;
+                        bool selected = false;
+                        try { selected = ann != null && ann.Select3(false, null); } catch { }
+                        if (!selected) continue;
+                        modelDoc.EditDelete();
+                        ExecLog.Write($"sheet style removed stamp '{t}'");
+                    }
+                }
+                view = view.GetNextView() as IView;
+            }
+        }
+
+        private static string SheetScaleText(IDrawingDoc drawingDoc)
+        {
+            var view = drawingDoc.GetFirstView() as IView;
+            while (view != null)
+            {
+                if (view.Type != 1)
+                {
+                    double s = 1.0;
+                    try { s = view.ScaleDecimal; } catch { }
+                    if (s <= 0) s = 1.0;
+                    return "1:" + (1.0 / s).ToString("0.#", CultureInfo.InvariantCulture);
+                }
+                view = view.GetNextView() as IView;
+            }
+            return "1:1";
+        }
+
         private static int CurrentPageNumber(IDrawingDoc drawingDoc, string sheetName)
         {
             var names = drawingDoc.GetSheetNames() as string[];
@@ -1402,8 +1638,9 @@ namespace SolidworksExecution.Services
         }
 
         // Resolves {placeholders} in note text from the drawing and its referenced model.
-        // Unknown placeholders are left untouched so a literal brace in the text survives.
-        private string ResolveNotePlaceholders(string text, IDrawingDoc drawingDoc, IModelDoc2 modelDoc)
+        // Fully universal: reads actual SolidWorks model custom properties and materials.
+        // Overrides can be passed dynamically in any language via DrawingTemplateOptions.
+        private string ResolveNotePlaceholders(string text, IDrawingDoc drawingDoc, IModelDoc2 modelDoc, DrawingTemplateOptions options = null)
         {
             if (string.IsNullOrEmpty(text) || text.IndexOf('{') < 0)
                 return text;
@@ -1413,21 +1650,49 @@ namespace SolidworksExecution.Services
 
             string partName = "";
             string material = "";
+            string fullModelPath = "";
             var view = drawingDoc.GetFirstView() as IView;
             while (view != null)
             {
                 string refName = view.GetReferencedModelName();
                 if (!string.IsNullOrEmpty(refName))
                 {
+                    fullModelPath = refName;
                     partName = System.IO.Path.GetFileNameWithoutExtension(refName);
                     try
                     {
                         var refDoc = view.ReferencedDocument as IModelDoc2;
+                        if (refDoc != null)
+                        {
+                            var cpm = refDoc.Extension.CustomPropertyManager[""];
+                            if (cpm != null)
+                            {
+                                string val = "", res = "";
+                                if (cpm.Get4("Description", false, out val, out res) && !string.IsNullOrEmpty(res))
+                                    partName = res;
+                                else if (cpm.Get4("Title", false, out val, out res) && !string.IsNullOrEmpty(res))
+                                    partName = res;
+                                else if (cpm.Get4("PartName", false, out val, out res) && !string.IsNullOrEmpty(res))
+                                    partName = res;
+                                else if (cpm.Get4("Part Name", false, out val, out res) && !string.IsNullOrEmpty(res))
+                                    partName = res;
+                            }
+                        }
                         var part = refDoc as IPartDoc;
                         if (part != null)
                         {
                             string db = "";
                             material = part.GetMaterialPropertyName2("", out db) ?? "";
+                        }
+                        if (string.IsNullOrEmpty(material) && refDoc != null)
+                        {
+                            var cpm = refDoc.Extension.CustomPropertyManager[""];
+                            if (cpm != null)
+                            {
+                                string val = "", res = "";
+                                if (cpm.Get4("Material", false, out val, out res) && !string.IsNullOrEmpty(res))
+                                    material = res;
+                            }
                         }
                     }
                     catch (Exception) { }
@@ -1436,20 +1701,32 @@ namespace SolidworksExecution.Services
                 view = view.GetNextView() as IView;
             }
 
+            if (string.IsNullOrEmpty(partName))
+            {
+                string dt = System.IO.Path.GetFileNameWithoutExtension(modelDoc.GetPathName());
+                if (!string.IsNullOrEmpty(dt)) partName = dt;
+            }
+
+            // Explicit options overrides (caller can provide in ANY language)
+            if (!string.IsNullOrEmpty(options?.PartName)) partName = options.PartName;
+            if (!string.IsNullOrEmpty(options?.Material)) material = options.Material;
+
             string units = UnitName(modelDoc.Extension.GetUserPreferenceInteger(SW_PREF_UNITS_LINEAR, 0));
+            string unitVal = !string.IsNullOrEmpty(options?.Unit) ? options.Unit : "1 pcs";
 
             var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
                 ["part_name"] = partName,
-                ["material"] = material,
+                ["material"] = !string.IsNullOrEmpty(material) ? material : "-",
                 ["model"] = partName,
                 ["drawing"] = System.IO.Path.GetFileNameWithoutExtension(modelDoc.GetPathName()),
                 ["sheet"] = sheetName,
                 ["page"] = CurrentPageNumber(drawingDoc, sheetName).ToString(CultureInfo.InvariantCulture),
                 ["pages"] = drawingDoc.GetSheetCount().ToString(CultureInfo.InvariantCulture),
-                ["scale"] = ScaleText(FirstModelView(drawingDoc)),
+                ["scale"] = ScaleText(FirstModelView(drawingDoc)) ?? SheetScaleText(drawingDoc),
                 ["date"] = DateTime.Now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
-                ["units"] = units
+                ["units"] = units,
+                ["unit"] = unitVal
             };
 
             string result = text;
